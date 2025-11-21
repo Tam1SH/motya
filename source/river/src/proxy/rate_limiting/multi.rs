@@ -4,7 +4,7 @@
 //!
 //! See the [`Rater`] structure for more details
 
-use std::{fmt::Debug, hash::Hash, net::IpAddr, sync::Arc, time::Duration};
+use std::{fmt::Debug, hash::Hash, net::IpAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use concread::arcache::{ARCache, ARCacheBuilder};
 use leaky_bucket::RateLimiter;
@@ -34,12 +34,12 @@ pub struct MultiRaterConfig {
     pub max_buckets: usize,
     /// The max and initial number of tokens in the leaky bucket - this is the number of
     /// requests that can go through without any waiting if the bucket is full
-    pub max_tokens_per_bucket: usize,
+    pub max_tokens_per_bucket: NonZeroUsize,
     /// The interval between "refills" of the bucket, e.g. the bucket refills `refill_qty`
     /// every `refill_interval_millis`
-    pub refill_interval_millis: usize,
+    pub refill_interval_millis: NonZeroUsize,
     /// The number of tokens added to the bucket every `refill_interval_millis`
-    pub refill_qty: usize,
+    pub refill_qty: NonZeroUsize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,9 +146,9 @@ where
     Key: Hash + Eq + Ord + Clone + Debug + Sync + Send + 'static,
 {
     cache: ARCache<Key, Arc<RateLimiter>>,
-    max_tokens_per_bucket: usize,
-    refill_interval_millis: usize,
-    refill_qty: usize,
+    max_tokens_per_bucket: NonZeroUsize,
+    refill_interval_millis: NonZeroUsize,
+    refill_qty: NonZeroUsize,
 }
 
 impl<Key> Debug for Rater<Key>
@@ -234,10 +234,10 @@ where
 
     fn new_rate_limiter(&self) -> RateLimiter {
         RateLimiter::builder()
-            .initial(self.max_tokens_per_bucket)
-            .max(self.max_tokens_per_bucket)
-            .interval(Duration::from_millis(self.refill_interval_millis as u64))
-            .refill(self.refill_qty)
+            .initial(self.max_tokens_per_bucket.get())
+            .max(self.max_tokens_per_bucket.get())
+            .interval(Duration::from_millis(self.refill_interval_millis.get() as u64))
+            .refill(self.refill_qty.get())
             .fair(true)
             .build()
     }
@@ -246,7 +246,6 @@ where
 #[cfg(test)]
 mod test {
     use crate::proxy::rate_limiting::Outcome;
-
     use super::*;
     use std::time::Instant;
     use tokio::time::interval;
@@ -257,9 +256,9 @@ mod test {
         let config = MultiRaterConfig {
             threads: 2,
             max_buckets: 5,
-            max_tokens_per_bucket: 3,
-            refill_interval_millis: 10,
-            refill_qty: 1,
+            max_tokens_per_bucket: NonZeroUsize::new(3).unwrap(),
+            refill_interval_millis: NonZeroUsize::new(10).unwrap(),
+            refill_qty: NonZeroUsize::new(1).unwrap(),
         };
 
         let rater = Arc::new(Rater::new(config.clone()));
@@ -282,12 +281,45 @@ mod test {
         let duration = duration.as_secs_f64();
         let approved = approved as f64;
 
-        let expected_rate = 1000.0f64 / config.refill_interval_millis as f64;
-        let expected_ttl = (duration * expected_rate) + config.max_tokens_per_bucket as f64;
+        let expected_rate = 1000.0f64 / config.refill_interval_millis.get() as f64;
+        let expected_ttl = (duration * expected_rate) + config.max_tokens_per_bucket.get() as f64;
 
         // Did we get +/-10% of the expected number of approvals?
         tracing::info!(expected_ttl, actual_ttl = approved, "Rates");
         assert!(approved > (expected_ttl * 0.9f64));
         assert!(approved < (expected_ttl * 1.1f64));
+    }
+
+    #[tokio::test]
+    async fn multi_instance_get_ticket_by_path() {
+        let instance = MultiRaterInstance::new(
+            MultiRaterConfig {
+                threads: 2,
+                max_buckets: 5,
+                max_tokens_per_bucket: NonZeroUsize::new(3).unwrap(),
+                refill_interval_millis: NonZeroUsize::new(10).unwrap(),
+                refill_qty: NonZeroUsize::new(1).unwrap(),
+            },
+            MultiRequestKeyKind::Uri {
+                pattern: RegexShim::new("static/.*").unwrap(),
+            },
+        );
+        {
+            let buf = std::io::Cursor::new(b"GET /static/42.ext HTTP/1.1\r\n\r\n".to_vec());
+            let mut session = Session::new_h1(Box::new(buf));
+            session.read_request().await.unwrap();
+
+            let ticket = instance.get_ticket(&session);
+            assert!(ticket.is_some());
+        }
+
+        {
+            let buf = std::io::Cursor::new(b"GET /something-else HTTP/1.1\r\n\r\n".to_vec());
+            let mut session = Session::new_h1(Box::new(buf));
+            session.read_request().await.unwrap();
+
+            let ticket = instance.get_ticket(&session);
+            assert!(ticket.is_none());
+        }
     }
 }
