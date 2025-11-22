@@ -5,7 +5,7 @@ mod proxy;
 use crate::{files::river_file_server, proxy::river_proxy_service};
 use config::internal::{ListenerConfig, ListenerKind};
 use pingora::{server::Server, services::Service};
-use pingora_core::listeners::TlsSettings;
+use pingora_core::listeners::tls::TlsSettings;
 
 fn main() {
     // Set up tracing, including catching `log` crate logs from pingora crates

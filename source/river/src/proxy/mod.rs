@@ -374,10 +374,11 @@ where
         session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
-    ) {
+    ) -> Result<()> {
         for filter in &self.modifiers.upstream_response_filters {
             filter.upstream_response_filter(session, upstream_response, ctx);
         }
+        Ok(())
     }
 }
 

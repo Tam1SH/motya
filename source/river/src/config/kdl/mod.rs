@@ -21,23 +21,24 @@ use crate::{
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use miette::{bail, Diagnostic, SourceSpan};
 use pingora::{protocols::ALPN, upstreams::peer::HttpPeer};
+use tracing_subscriber::fmt::format;
 
 use super::internal::RateLimitingConfig;
 
 mod utils;
 
 /// This is the primary interface for parsing the document.
-impl TryFrom<KdlDocument> for Config {
+impl TryFrom<&KdlDocument> for Config {
     type Error = miette::Error;
 
-    fn try_from(value: KdlDocument) -> Result<Self, Self::Error> {
+    fn try_from(value: &KdlDocument) -> Result<Self, Self::Error> {
         let SystemData {
             threads_per_service,
             daemonize,
             upgrade_socket,
             pid_file,
-        } = extract_system_data(&value)?;
-        let (basic_proxies, file_servers) = extract_services(threads_per_service, &value)?;
+        } = extract_system_data(value)?;
+        let (basic_proxies, file_servers) = extract_services(threads_per_service, value)?;
 
         Ok(Config {
             threads_per_service,
@@ -92,9 +93,7 @@ fn extract_services(
             let name = ch.name().value();
             let dupe = !fingerprint_set.insert(name);
             if dupe {
-                return Err(
-                    Bad::docspan(format!("Duplicate section: '{name}'!"), doc, &ch.span()).into(),
-                );
+                return Err(Bad::docspan(format!("Duplicate section: '{name}'!"), doc, &ch.span()).into());
             }
         }
 
@@ -127,7 +126,7 @@ fn extract_services(
 
             // Then inform the user about the reason for our discontent
             return Err(Bad::docspan(
-                format!("Unknown configuration section(s): {what}"),
+                format!("Unknown configuration section(s): '{what}'"),
                 doc,
                 &service.span(),
             )
@@ -254,7 +253,7 @@ fn extract_service(
     for (node, name, args) in conns {
         if name == "load-balance" {
             if load_balance.is_some() {
-                panic!("Don't have two 'load-balance' sections");
+                return Err(Bad::docspan("Duplicate 'load-balance' section", doc, &node.span()).into());
             }
             load_balance = Some(extract_load_balance(doc, node)?);
             continue;
@@ -603,7 +602,7 @@ fn extract_listener(
     let args = utils::str_value_args(doc, args)?
         .into_iter()
         .collect::<HashMap<&str, &KdlEntry>>();
-
+    
     // Is this a bindable name?
     if name.parse::<SocketAddr>().is_ok() {
         // Cool: do we have reasonable args for this?
@@ -623,22 +622,22 @@ fn extract_listener(
             // We must have both of cert-path and key-path if both are present
             // ignore "offer-h2" if this is incorrect
             (None, Some(_), _) | (Some(_), None, _) => {
-                return Err(Bad::docspan(
+                Err(Bad::docspan(
                     "'cert-path' and 'key-path' must either BOTH be present, or NEITHER should be present",
                     doc,
                     &node.span(),
                 )
-                .into());
+                .into())
             }
             // We can't offer H2 if we don't have TLS (at least for now, unless we
             // expose H2C settings in pingora)
             (None, None, Some(_)) => {
-                return Err(Bad::docspan(
+                Err(Bad::docspan(
                     "'offer-h2' requires TLS, specify 'cert-path' and 'key-path'",
                     doc,
                     &node.span(),
                 )
-                .into());
+                .into())
             }
             (Some(cpath), Some(kpath), offer_h2) => Ok(ListenerConfig {
                 source: ListenerKind::Tcp {
@@ -782,26 +781,35 @@ impl Bad {
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, net::SocketAddr, num::NonZeroUsize};
-
+    use kdl::{KdlDocument, KdlError};
+    use lazy_static::lazy_static;
     use pingora::upstreams::peer::HttpPeer;
 
+    pub type Result<T> = miette::Result<T>;
     use crate::{
         config::internal::{
-            FileServerConfig, ListenerConfig, ListenerKind, ProxyConfig, UpstreamOptions,
+            Config, FileServerConfig, ListenerConfig, ListenerKind, ProxyConfig, UpstreamOptions
         },
         proxy::{
-            rate_limiting::{multi::MultiRaterConfig, AllRateConfig, RegexShim},
+            rate_limiting::{AllRateConfig, RegexShim, multi::MultiRaterConfig},
             request_selector::uri_path_selector,
         },
     };
 
+    lazy_static! {
+        static ref RESOURCE: kdl::KdlDocument = {
+            let kdl_contents = std::fs::read_to_string("./assets/test-config.kdl").unwrap();
+
+            kdl_contents.parse().unwrap_or_else(|e| {
+                panic!("Error parsing KDL file: {e:?}");
+            })
+        };
+    }
+
     #[test]
     fn load_test() {
-        let kdl_contents = std::fs::read_to_string("./assets/test-config.kdl").unwrap();
+        let doc = &*RESOURCE;
 
-        let doc: ::kdl::KdlDocument = kdl_contents.parse().unwrap_or_else(|e| {
-            panic!("Error parsing KDL file: {e:?}");
-        });
         let val: crate::config::internal::Config = doc.try_into().unwrap_or_else(|e| {
             panic!("Error rendering config from KDL file: {e:?}");
         });
@@ -999,20 +1007,167 @@ mod tests {
         }
     }
 
-    /// Empty: not allowed
+    fn err_parse_handler(e: KdlError) -> KdlDocument  {
+        panic!("Error parsing KDL file: {e:?}");
+    }
+
+    fn err_render_config_handler(e: miette::Error) -> Config {
+        panic!("Error rendering config from KDL file: {e:?}");
+    }
+
+    const SERVICE_WITHOUT_CONNECTOR: &str = r#"
+    services {
+        Example {
+            listeners {
+                "127.0.0.1:80"
+            }
+            connectors { }
+        }
+    }
+    "#;
+    #[test]
+    fn service_without_connector() {
+        let doc = &SERVICE_WITHOUT_CONNECTOR.parse().unwrap_or_else(err_parse_handler);
+        let val: Result<Config> = doc.try_into();
+        let msg = val
+            .unwrap_err()
+            .help()
+            .unwrap()
+            .to_string();
+
+        assert!(msg.contains("We require at least one connector"));
+    }
+
+    const SERVICE_DUPLICATE_LOAD_BALANCE_SECTIONS: &str = r#"
+    services {
+        Example {
+            listeners {
+                "127.0.0.1:80"
+            }
+            connectors {
+                load-balance {
+                    selection "Ketama" key="UriPath"
+                    discovery "Static"
+                    health-check "None"
+                }
+                load-balance {
+                    selection "Ketama" key="UriPath"
+                    discovery "Static"
+                    health-check "None"
+                }
+                "127.0.0.1:8000"
+            }
+        }
+    }
+    "#;
+    #[test]
+    fn service_duplicate_load_balance_sections() {
+        let doc = &SERVICE_DUPLICATE_LOAD_BALANCE_SECTIONS.parse().unwrap_or_else(err_parse_handler);
+        let val: Result<Config> = doc.try_into();
+        let msg = val
+            .unwrap_err()
+            .help()
+            .unwrap()
+            .to_string();
+
+        assert!(msg.contains("Duplicate 'load-balance' section"));
+    }
+
+    const SERVICE_BASE_PATH_NOT_EXIST_TEST: &str = r#"
+    services {
+        Example {
+            listeners {
+                "127.0.0.1:80"
+            }
+            file-server { }
+        }
+    }
+    "#;
+
+    #[test]
+    fn service_base_path_not_exist() {
+        let doc = &SERVICE_BASE_PATH_NOT_EXIST_TEST.parse().unwrap_or_else(err_parse_handler);
+        let val: Config = doc.try_into().unwrap_or_else(err_render_config_handler);
+        assert_eq!(val.file_servers.len(), 1);
+        assert_eq!(val.file_servers[0].base_path, None);
+    }
+
+    const SERVICE_EMPTY_LISTENERS_TEST: &str = r#"
+    services {
+        Example {
+            listeners { }
+        }
+    }
+    "#;
+
+    #[test]
+    fn service_empty_listeners() {
+        let doc = &SERVICE_EMPTY_LISTENERS_TEST.parse().unwrap_or_else(err_parse_handler);
+        let val: Result<Config> = doc.try_into();
+        let msg = val
+            .unwrap_err()
+            .help()
+            .unwrap()
+            .to_string();
+
+        assert!(msg.contains("nonzero listeners required"));
+    }
+
+    const SERVICE_INVALID_NODE_TEST: &str = r#"
+    services {
+        Example {
+            invalid-node { }
+        }
+    }
+    "#;
+
+    #[test]
+    fn service_invalid_node() {
+        let doc = &SERVICE_INVALID_NODE_TEST.parse().unwrap_or_else(err_parse_handler);
+        let val: Result<Config> = doc.try_into();
+        let msg = val
+            .unwrap_err()
+            .help()
+            .unwrap()
+            .to_string();
+        
+        assert!(msg.contains("Unknown configuration section(s): 'invalid-node'"));
+    }
+
+    
+    const DUPLICATE_SERVICE_NODES_TEST: &str = r#"
+    services {
+        Example {
+            listeners { }
+            listeners { } 
+        }
+    }
+    "#;
+
+    #[test]
+    fn duplicate_services() {
+        let doc = &DUPLICATE_SERVICE_NODES_TEST.parse().unwrap_or_else(err_parse_handler);
+        let val: Result<Config> = doc.try_into();
+        let msg = val
+            .unwrap_err()
+            .help()
+            .unwrap()
+            .to_string();
+        
+        assert!(msg.contains("Duplicate section: 'listeners'!"));
+    }
+
     const EMPTY_TEST: &str = "
     ";
 
     #[test]
     fn empty() {
-        let doc: ::kdl::KdlDocument = EMPTY_TEST.parse().unwrap_or_else(|e| {
-            panic!("Error parsing KDL file: {e:?}");
-        });
-        let val: Result<crate::config::internal::Config, _> = doc.try_into();
+        let doc = &EMPTY_TEST.parse().unwrap_or_else(err_parse_handler);
+        let val: Result<Config> = doc.try_into();
         assert!(val.is_err());
     }
 
-    /// Empty services: not allowed
+    
     const SERVICES_EMPTY_TEST: &str = "
         services {
 
@@ -1021,10 +1176,8 @@ mod tests {
 
     #[test]
     fn services_empty() {
-        let doc: ::kdl::KdlDocument = SERVICES_EMPTY_TEST.parse().unwrap_or_else(|e| {
-            panic!("Error parsing KDL file: {e:?}");
-        });
-        let val: Result<crate::config::internal::Config, _> = doc.try_into();
+        let doc = &SERVICES_EMPTY_TEST.parse().unwrap_or_else(err_parse_handler);
+        let val: Result<Config> = doc.try_into();
         assert!(val.is_err());
     }
 
@@ -1044,12 +1197,8 @@ mod tests {
 
     #[test]
     fn one_service() {
-        let doc: ::kdl::KdlDocument = ONE_SERVICE_TEST.parse().unwrap_or_else(|e| {
-            panic!("Error parsing KDL file: {e:?}");
-        });
-        let val: crate::config::internal::Config = doc.try_into().unwrap_or_else(|e| {
-            panic!("Error rendering config from KDL file: {e:?}");
-        });
+        let doc: &::kdl::KdlDocument = &ONE_SERVICE_TEST.parse().unwrap_or_else(err_parse_handler);
+        let val: Config = doc.try_into().unwrap_or_else(err_render_config_handler);
         assert_eq!(val.basic_proxies.len(), 1);
         assert_eq!(val.basic_proxies[0].listeners.len(), 1);
         assert_eq!(

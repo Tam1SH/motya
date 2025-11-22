@@ -24,37 +24,13 @@ install-updater = false
 inherits = "release"
 lto = "thin"
 
-[patch.crates-io.pingora-load-balancing]
-git = "https://github.com/memorysafety/pingora.git"
-rev = "a98eadde498a45f32ab906d629342954fa173d11"
-# path = "../pingora/pingora-load-balancing"
-
-[patch.crates-io.pingora-core]
-git = "https://github.com/memorysafety/pingora.git"
-rev = "a98eadde498a45f32ab906d629342954fa173d11"
-# path = "../pingora/pingora-core"
-
-[patch.crates-io.pingora-cache]
-git = "https://github.com/memorysafety/pingora.git"
-rev = "a98eadde498a45f32ab906d629342954fa173d11"
-# path = "../pingora/pingora-cache"
-
-[patch.crates-io.pingora-http]
-git = "https://github.com/memorysafety/pingora.git"
-rev = "a98eadde498a45f32ab906d629342954fa173d11"
-# path = "../pingora/pingora-http"
-
-[patch.crates-io.pingora-proxy]
-git = "https://github.com/memorysafety/pingora.git"
-rev = "a98eadde498a45f32ab906d629342954fa173d11"
-# path = "../pingora/pingora-proxy"
 
 [patch.crates-io.static-files-module]
-git = "https://github.com/pandora-web-server/pandora-web-server.git"
-rev = "fe5d7dfc7d943d2bd8371309084a775db99e84f0"
+git = "https://github.com/Tam1SH/pandora-web-server.git"
+rev = "050b9a86226bd08c152ffa4fc25bdfada4f66ea1"
 # path = "../pandora-web-server/static-files-module"
 
 [patch.crates-io.pandora-module-utils]
-git = "https://github.com/pandora-web-server/pandora-web-server.git"
-rev = "fe5d7dfc7d943d2bd8371309084a775db99e84f0"
+git = "https://github.com/Tam1SH/pandora-web-server.git"
+rev = "050b9a86226bd08c152ffa4fc25bdfada4f66ea1"
 # path = "../pandora-web-server/pandora-module-utils"

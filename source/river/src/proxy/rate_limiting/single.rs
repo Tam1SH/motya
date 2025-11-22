@@ -86,7 +86,7 @@ mod test {
             },
             SingleRequestKeyKind::UriGroup {
                 pattern: RegexShim::new("static/.*").unwrap()
-        });
+            });
         {    
             // Create an in-memory buffer simulating raw HTTP request bytes
             let buf = Cursor::new(b"GET /static/42.ext HTTP/1.1\r\n\r\n".to_vec());

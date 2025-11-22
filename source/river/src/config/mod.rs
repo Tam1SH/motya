@@ -7,7 +7,6 @@ use std::fs::read_to_string;
 
 use clap::Parser;
 use cli::Cli;
-
 use crate::config::toml::Toml;
 
 pub fn render_config() -> internal::Config {
@@ -30,7 +29,7 @@ pub fn render_config() -> internal::Config {
         let kdl_contents = read_to_string(kdl_path).unwrap_or_else(|e| {
             panic!("Error loading KDL file: {e:?}");
         });
-        let doc: ::kdl::KdlDocument = kdl_contents.parse().unwrap_or_else(|e| {
+        let doc: &::kdl::KdlDocument = &kdl_contents.parse().unwrap_or_else(|e| {
             panic!("Error parsing KDL file: {e:?}");
         });
         let val: internal::Config = doc.try_into().unwrap_or_else(|e| {

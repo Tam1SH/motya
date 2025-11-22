@@ -112,7 +112,7 @@ impl Config {
     }
 }
 
-///
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct RateLimitingConfig {
     pub(crate) rules: Vec<AllRateConfig>,
