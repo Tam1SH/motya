@@ -26,7 +26,7 @@ use crate::{
     populate_listners,
     proxy::{
         request_modifiers::RequestModifyMod, request_selector::RequestSelector,
-        response_modifiers::ResponseModifyMod,
+        response_modifiers::ResponseModifyMod, wasm_modules::module::WasmModuleFilter,
     },
 };
 
@@ -40,6 +40,7 @@ pub mod request_filters;
 pub mod request_modifiers;
 pub mod request_selector;
 pub mod response_modifiers;
+pub mod wasm_modules;
 
 pub struct RateLimiters {
     request_filter_stage_multi: Vec<MultiRaterInstance>,
@@ -196,6 +197,9 @@ impl Modifiers {
                 "block-cidr-range" => {
                     Box::new(request_filters::CidrRangeFilter::from_settings(filter).unwrap())
                 }
+                "module" => {
+                    Box::new(WasmModuleFilter::from_settings(filter).unwrap())
+                }
                 other => {
                     tracing::warn!("Unknown request filter: '{other}'");
                     return Err(Error::new(ErrorType::Custom("Bad configuration")));
@@ -221,7 +225,6 @@ impl Modifiers {
             };
             upstream_request_filters.push(f);
         }
-
         let mut upstream_response_filters: Vec<Box<dyn ResponseModifyMod>> = vec![];
         for mut filter in conf.upstream_response_filters.drain(..) {
             let kind = filter.remove("kind").unwrap();
@@ -239,7 +242,7 @@ impl Modifiers {
             };
             upstream_response_filters.push(f);
         }
-
+        
         Ok(Self {
             request_filters: request_filter_mods,
             upstream_request_filters,

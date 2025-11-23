@@ -38,6 +38,11 @@ thiserror = "2.0.17"
 tokio = "1.37.0" # TODO: check for implicit feature usage
 toml = "0.9.8"
 tracing = "0.1.40"
+# WASM
+wit-bindgen = { version = "0.48.1" }
+wasmtime = { version = "39.0.0", features = ["component-model"] }
+wasmtime-wasi = "39.0.0"
+wasmtime-wasi-io = "39.0.0"
 
 # Pingora dependencies
 pingora = "0.6.0"
@@ -45,6 +50,10 @@ pingora-core = { version = "0.6.0", features = ["openssl", "openssl_derived"] }
 pingora-proxy = "0.6.0"
 pingora-http = "0.6.0"
 pingora-load-balancing = "0.6.0"
+
+
+[dev-dependencies]
+wit-bindgen = { version = "0.48.1" }
 
 [dependencies.static-files-module]
 version = "0.2"

@@ -268,24 +268,7 @@ fn extract_service(
     }
 
     // Path Control (optional)
-    //
-    let mut pc = PathControl::default();
-    if let Some(pc_node) = utils::optional_child_doc(doc, node, "path-control") {
-        // request-filters (optional)
-        if let Some(ureq_node) = utils::optional_child_doc(doc, pc_node, "request-filters") {
-            pc.request_filters = collect_filters(doc, ureq_node)?;
-        }
-
-        // upstream-request (optional)
-        if let Some(ureq_node) = utils::optional_child_doc(doc, pc_node, "upstream-request") {
-            pc.upstream_request_filters = collect_filters(doc, ureq_node)?;
-        }
-
-        // upstream-response (optional)
-        if let Some(uresp_node) = utils::optional_child_doc(doc, pc_node, "upstream-response") {
-            pc.upstream_response_filters = collect_filters(doc, uresp_node)?
-        }
-    }
+    let pc = extract_path_control(doc, node)?;
 
     // Rate limiting
     let mut rl = RateLimitingConfig::default();
@@ -316,6 +299,28 @@ fn extract_service(
         upstream_options: load_balance.unwrap_or_default(),
         rate_limiting: rl,
     })
+}
+
+fn extract_path_control(doc: &KdlDocument, node: &KdlDocument) -> Result<PathControl, miette::Error> {
+
+    let mut pc = PathControl::default();
+    if let Some(pc_node) = utils::optional_child_doc(doc, node, "path-control") {
+        // request-filters (optional)
+        if let Some(ureq_node) = utils::optional_child_doc(doc, pc_node, "request-filters") {
+            pc.request_filters = collect_filters(doc, ureq_node)?;
+        }
+
+        // upstream-request (optional)
+        if let Some(ureq_node) = utils::optional_child_doc(doc, pc_node, "upstream-request") {
+            pc.upstream_request_filters = collect_filters(doc, ureq_node)?;
+        }
+
+        // upstream-response (optional)
+        if let Some(uresp_node) = utils::optional_child_doc(doc, pc_node, "upstream-response") {
+            pc.upstream_response_filters = collect_filters(doc, uresp_node)?
+        }
+    }
+    Ok(pc)
 }
 
 fn make_rate_limiter(
@@ -728,7 +733,7 @@ fn extract_threads_per_service(doc: &KdlDocument, sys: &KdlDocument) -> miette::
 }
 
 #[derive(thiserror::Error, Debug, Diagnostic)]
-#[error("Incorrect configuration contents")]
+#[error("{error}")]
 struct Bad {
     #[help]
     error: String,
@@ -1015,6 +1020,35 @@ mod tests {
         panic!("Error rendering config from KDL file: {e:?}");
     }
 
+    const SERVICE_WITH_WASM_MODULE : &str = r#"
+    services {
+        Example {
+            listeners {
+                "0.0.0.0:8080"
+                "0.0.0.0:4443" cert-path="./assets/test.crt" key-path="./assets/test.key" offer-h2=#true
+            }
+            connectors {
+                "127.0.0.1:8000"
+            }
+            path-control {
+                request-filters {
+                    filter kind="module" path="./assets/request_filter.wasm"
+                }
+            }
+        }
+    }"#;
+    #[test]
+    fn service_with_wasm_module() {
+        let doc = &SERVICE_WITH_WASM_MODULE.parse().unwrap_or_else(err_parse_handler);
+        let val: Config = doc.try_into().unwrap_or_else(err_render_config_handler);
+        let request_filters = &val.basic_proxies[0].path_control.request_filters[0];
+
+        dbg!(&request_filters);
+        assert_eq!(
+            val.basic_proxies[0].path_control.request_filters.len(), 1
+        );
+
+    }
     const SERVICE_WITHOUT_CONNECTOR: &str = r#"
     services {
         Example {
@@ -1064,10 +1098,9 @@ mod tests {
     fn service_duplicate_load_balance_sections() {
         let doc = &SERVICE_DUPLICATE_LOAD_BALANCE_SECTIONS.parse().unwrap_or_else(err_parse_handler);
         let val: Result<Config> = doc.try_into();
+
         let msg = val
             .unwrap_err()
-            .help()
-            .unwrap()
             .to_string();
 
         assert!(msg.contains("Duplicate 'load-balance' section"));
