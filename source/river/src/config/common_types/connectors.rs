@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::{collections::HashMap, hash::DefaultHasher};
 use std::fmt::Debug;
 
 use http::Uri;
-use pingora::prelude::HttpPeer;
+use pingora::{prelude::HttpPeer, upstreams::peer::Proxy};
+use pingora_core::protocols::l4::socket::SocketAddr;
 
 use crate::{config::{
     common_types::definitions::{FilterChain, Modificator},
@@ -16,12 +18,42 @@ pub struct HttpPeerOptions {
     pub target_path: Uri
 }
 
+impl PartialEq for HttpPeerOptions {
+    fn eq(&self, other: &Self) -> bool {
+        
+        if self.prefix_path != other.prefix_path 
+           || self.target_path != other.target_path 
+           || self.peer.scheme != other.peer.scheme 
+           || self.peer.sni != other.peer.sni 
+        {
+            return false;
+        }
+
+        
+        match (&self.peer._address, &other.peer._address) {
+            (SocketAddr::Inet(a), SocketAddr::Inet(b)) if a == b => { },
+            _ => return false,
+        }
+
+        let hash_proxy = |p: &Option<Proxy>| -> u64 {
+            let mut hasher = DefaultHasher::new();
+            p.hash(&mut hasher); 
+            hasher.finish()
+        };
+
+        hash_proxy(&self.peer.proxy) == hash_proxy(&other.peer.proxy)
+    }
+}
+
+
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Upstream {
     Service(HttpPeerOptions),
     Static(SimpleResponse)
 }
+
+
 
 #[allow(clippy::large_enum_variant)]
 pub enum ConnectorsLeaf {
@@ -31,15 +63,16 @@ pub enum ConnectorsLeaf {
     Section(Vec<ConnectorsLeaf>)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Connectors { 
     pub upstreams: Vec<UpstreamConfig>,
     pub anonymous_chains: HashMap<String, FilterChain>, 
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UpstreamConfig {
     pub upstream: Upstream,
     pub chains: Vec<Modificator>,
     pub lb_options: UpstreamOptions,
 }
+

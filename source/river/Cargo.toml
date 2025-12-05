@@ -58,6 +58,7 @@ pingora-http = "0.6.0"
 pingora-load-balancing = "0.6.0"
 async-recursion = "1.1.1"
 fqdn = "0.5.0"
+notify = "8.2.0"
 
 
 

@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use arc_swap::ArcSwap;
 use http::Uri;
 use pingora::{
     server::configuration::{Opt as PingoraOpt, ServerConf as PingoraServerConf},
@@ -23,7 +24,7 @@ use crate::{
 };
 
 /// River's internal configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub validate_configs: bool,
     pub threads_per_service: usize,
@@ -34,6 +35,8 @@ pub struct Config {
     pub basic_proxies: Vec<ProxyConfig>,
     pub file_servers: Vec<FileServerConfig>,
 }
+
+
 
 impl Config {
     /// Get the [`Opt`][PingoraOpt] field for Pingora
@@ -116,7 +119,7 @@ impl Config {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SimpleResponse {
     pub http_code: http::StatusCode,
     pub response_body: String,
@@ -129,7 +132,7 @@ pub struct SimpleResponse {
 // Basic Proxy Configuration
 //
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProxyConfig {
     pub name: String,
     pub listeners: Listeners,

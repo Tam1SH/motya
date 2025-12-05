@@ -6,8 +6,10 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 
+use futures_util::future::try_join_all;
 use pingora::server::Server;
 use pingora_core::{upstreams::peer::HttpPeer, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
@@ -31,6 +33,7 @@ pub mod filters;
 pub mod plugins;
 pub mod upstream_factory;
 pub mod populate_listeners;
+pub mod watcher;
 
 pub struct RateLimiters {
     request_filter_stage_multi: Vec<MultiRaterInstance>,
@@ -44,18 +47,37 @@ pub struct RateLimiters {
 /// of the [request/response lifecycle].
 ///
 /// [request/response lifecycle]: https://github.com/cloudflare/pingora/blob/7ce6f4ac1c440756a63b0766f72dbeca25c6fc94/docs/user_guide/phase_chart.md
+
+
+pub type SharedProxyState = Arc<ArcSwap<UpstreamRouter<UpstreamContext>>>;
+
+// impl RiverProxyService {
+//     pub fn new(initial_state: SharedProxyState) -> Self {
+//         Self {
+//             inner: Arc::new(ArcSwap::from_pointee(initial_state)),
+//         }
+//     }
+
+//     pub fn load(&self) -> Arc<SharedProxyState> {
+//         self.inner.load().clone()
+//     }
+
+//     pub fn update(&self, new_state: SharedProxyState) {
+//         self.inner.store(Arc::new(new_state));
+//     }
+// }
+
 pub struct RiverProxyService {
-    /// All modifiers used when implementing the [ProxyHttp] trait.
-    pub rate_limiters: RateLimiters,
-    pub router: Arc<UpstreamRouter<UpstreamContext>>
+    // pub rate_limiters: RateLimiters,
+    pub state: SharedProxyState
 }
 
 /// Create a proxy service, with the type parameters chosen based on the config file
-pub fn river_proxy_service(
+pub async fn river_proxy_service(
     conf: ProxyConfig,
-    chain_resolver: &ChainResolver,
+    chain_resolver: ChainResolver,
     server: &Server,
-) -> miette::Result<Box<dyn pingora::services::Service>> {
+) -> miette::Result<(Box<dyn pingora::services::Service>, SharedProxyState)> {
     
     let factory = UpstreamFactory::new(chain_resolver);
 
@@ -64,7 +86,7 @@ pub fn river_proxy_service(
         &conf.rate_limiting,
         &conf.listeners,
         factory,
-    server)
+    server).await
 }
 
 
@@ -73,55 +95,49 @@ pub fn river_proxy_service(
 impl RiverProxyService
 {
     /// Create a new [RiverProxyService] from the given [ProxyConfig]
-    pub fn from_basic_conf(
+    pub async fn from_basic_conf(
         upstream_configs: Vec<UpstreamConfig>,
         rate_limiting: &RateLimitingConfig,
         listeners: &Listeners,
         upstream_factory: UpstreamFactory,
         server: &Server,
-    ) -> miette::Result<Box<dyn pingora::services::Service>> {
+    ) -> miette::Result<(Box<dyn pingora::services::Service>, SharedProxyState)> {
 
-        let upstream_ctx = upstream_configs
+        let upstream_ctx = try_join_all(upstream_configs
             .into_iter()
-            .map(|cfg| upstream_factory.create_context(cfg))
-            .collect::<Result<Vec<_>, _>>()?; 
+            .map(|cfg| upstream_factory.create_context(cfg)))
+            .await?;
         
         let router = UpstreamRouter::build(upstream_ctx)
             .expect("Paths must be valid after parsing the configuration");
             
 
-        let mut request_filter_stage_multi = vec![];
-        let mut request_filter_stage_single = vec![];
+        // let mut request_filter_stage_multi = vec![];
+        // let mut request_filter_stage_single = vec![];
 
-        for rule in rate_limiting.rules.clone() {
-            match rule {
-                AllRateConfig::Single { kind, config } => {
-                    let rater = SingleInstance::new(config, kind);
-                    request_filter_stage_single.push(rater);
-                }
-                AllRateConfig::Multi { kind, config } => {
-                    let rater = MultiRaterInstance::new(config, kind);
-                    request_filter_stage_multi.push(rater);
-                }
-            }
-        }
+        // for rule in rate_limiting.rules.clone() {
+        //     match rule {
+        //         AllRateConfig::Single { kind, config } => {
+        //             let rater = SingleInstance::new(config, kind);
+        //             request_filter_stage_single.push(rater);
+        //         }
+        //         AllRateConfig::Multi { kind, config } => {
+        //             let rater = MultiRaterInstance::new(config, kind);
+        //             request_filter_stage_multi.push(rater);
+        //         }
+        //     }
+        // }
 
-        
+        let shared_state = Arc::new(ArcSwap::from_pointee(router));
         let mut my_proxy = pingora_proxy::http_proxy_service_with_name(
             &server.configuration,
-            Self {
-                rate_limiters: RateLimiters {
-                    request_filter_stage_multi,
-                    request_filter_stage_single,
-                },
-                router: Arc::new(router)
-            },
+            Self { state: shared_state.clone() },
             "ADADWDWDWDW",
         );
 
         populate_listners(listeners, &mut my_proxy);
 
-        Ok(Box::new(my_proxy))
+        Ok((Box::new(my_proxy), shared_state))
     }
 }
 
@@ -165,9 +181,10 @@ impl ProxyHttp for RiverProxyService
     type CTX = RiverContext;
 
     fn new_ctx(&self) -> Self::CTX {
+        let router = self.state.load();
         RiverContext {
             selector_buf: Vec::new(),
-            router: self.router.clone()
+            router: router.clone()
         }
     }
 
@@ -181,38 +198,38 @@ impl ProxyHttp for RiverProxyService
 
         if let Some(upstream_ctx) = router.get_upstream_by_path(RouteType::Strict(path)) {
             
-            let multis = self
-                .rate_limiters
-                .request_filter_stage_multi
-                .iter()
-                .filter_map(|l| l.get_ticket(session));
+            // let multis = self
+            //     .rate_limiters
+            //     .request_filter_stage_multi
+            //     .iter()
+            //     .filter_map(|l| l.get_ticket(session));
 
-            let singles = self
-                .rate_limiters
-                .request_filter_stage_single
-                .iter()
-                .filter_map(|l| l.get_ticket(session));
+            // let singles = self
+            //     .rate_limiters
+            //     .request_filter_stage_single
+            //     .iter()
+            //     .filter_map(|l| l.get_ticket(session));
 
-            // Attempt to get all tokens
-            //
-            // TODO: If https://github.com/udoprog/leaky-bucket/issues/17 is resolved we could
-            // remember the buckets that we did get approved for, and "return" the unused tokens.
-            //
-            // For now, if some tickets succeed but subsequent tickets fail, the preceeding
-            // approved tokens are just "burned".
-            //
-            // TODO: If https://github.com/udoprog/leaky-bucket/issues/34 is resolved we could
-            // support a "max debt" number, allowing us to delay if acquisition of the token
-            // would happen soon-ish, instead of immediately 429-ing if the token we need is
-            // about to become available.
-            if singles
-                .chain(multis)
-                .any(|t| t.now_or_never() == Outcome::Declined)
-            {
-                tracing::trace!("Rejecting due to rate limiting failure");
-                session.downstream_session.respond_error(429).await?;
-                return Ok(true);
-            }
+            // // Attempt to get all tokens
+            // //
+            // // TODO: If https://github.com/udoprog/leaky-bucket/issues/17 is resolved we could
+            // // remember the buckets that we did get approved for, and "return" the unused tokens.
+            // //
+            // // For now, if some tickets succeed but subsequent tickets fail, the preceeding
+            // // approved tokens are just "burned".
+            // //
+            // // TODO: If https://github.com/udoprog/leaky-bucket/issues/34 is resolved we could
+            // // support a "max debt" number, allowing us to delay if acquisition of the token
+            // // would happen soon-ish, instead of immediately 429-ing if the token we need is
+            // // about to become available.
+            // if singles
+            //     .chain(multis)
+            //     .any(|t| t.now_or_never() == Outcome::Declined)
+            // {
+            //     tracing::trace!("Rejecting due to rate limiting failure");
+            //     session.downstream_session.respond_error(429).await?;
+            //     return Ok(true);
+            // }
 
             for chain in &upstream_ctx.chains {
                 for filter in &chain.actions {

@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use crate::config::common_types::definitions::{DefinitionsTable, FilterChain};
 use crate::proxy::filters::registry::{FilterInstance, FilterRegistry, RegistryFilterContainer};
 use crate::proxy::filters::types::{RequestFilterMod, RequestModifyMod, ResponseModifyMod};
 use crate::proxy::plugins::module::{FilterType, WasmInvoker};
 use miette::{Context, IntoDiagnostic, Result, miette};
+use tokio::sync::Mutex;
 
 #[derive(Default)]
 pub struct RuntimeChain {
@@ -12,17 +14,20 @@ pub struct RuntimeChain {
     pub res_mods: Vec<Box<dyn ResponseModifyMod>>,
 }
 
+#[derive(Clone)]
 pub struct ChainResolver {
     table: DefinitionsTable,
-    registry: FilterRegistry,
+    registry: Arc<Mutex<FilterRegistry>>,
 }
 
 impl ChainResolver {
     
-    pub fn new(table: DefinitionsTable, registry: FilterRegistry) -> Result<Self> {
+    pub async fn new(table: DefinitionsTable, registry: Arc<Mutex<FilterRegistry>>) -> Result<Self> {
+        let registry_ = registry.lock().await;
+
         for (chain_name, chain) in table.get_chains() {
             for filter in &chain.filters {
-                if !registry.contains(&filter.name) {
+                if !registry_.contains(&filter.name) {
                     return Err(miette!(
                         "Chain '{}' references unknown filter '{}'. Did you forget to load a plugin?",
                         chain_name,
@@ -32,32 +37,35 @@ impl ChainResolver {
             }
         }
         
-        for filter_name in &table.available_filters {
-            if !registry.contains(filter_name) {
+        for filter_name in table.get_available_filters() {
+            if !registry_.contains(filter_name) {
                 return Err(miette!("Filter '{}' is defined but not registered.", filter_name));
             }
         }
 
+        drop(registry_);
+
         Ok(Self { table, registry })
     }
 
-    pub fn resolve(&self, chain_name: &str) -> Result<RuntimeChain> {
+    pub async fn resolve(&self, chain_name: &str) -> Result<RuntimeChain> {
         let chain_cfg = self.table.get_chains().get(chain_name).ok_or_else(|| {
             miette!("Chain '{}' not found in definitions table", chain_name)
         })?;
 
-        self.build_chain(chain_cfg, chain_name)
+        self.build_chain(chain_cfg, chain_name).await
     }
 
-    fn build_chain(&self, chain: &FilterChain, context_name: &str) -> Result<RuntimeChain> {
+    async fn build_chain(&self, chain: &FilterChain, context_name: &str) -> Result<RuntimeChain> {
         let mut runtime_chain = RuntimeChain::default();
 
         for filter_cfg in &chain.filters {
             let settings: BTreeMap<String, String> = filter_cfg.args.iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-
-            let container = self.registry
+            
+            let registry = self.registry.lock().await;
+            let container = registry
                 .build(&filter_cfg.name, settings.clone())
                 .into_diagnostic()
                 .wrap_err_with(|| format!("Failed to build filter '{}' in chain '{}'", filter_cfg.name, context_name))?;

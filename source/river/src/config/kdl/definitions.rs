@@ -97,7 +97,7 @@ impl<'a> DefinitionsSection<'a> {
 
             let plugin_def = self.parse_single_plugin(plugin_node)?;
 
-            if table.plugins.contains_key(&plugin_def.name) {
+            if table.get_plugins().contains_key(&plugin_def.name) {
                 return Err(Bad::docspan(
                     format!("Duplicate plugin definition: '{}'", plugin_def.name),
                     self.doc,
@@ -105,7 +105,7 @@ impl<'a> DefinitionsSection<'a> {
                 ).into());
             }
 
-            table.plugins.insert(plugin_def.name.clone(), plugin_def);
+            table.insert_plugin(plugin_def.name.clone(), plugin_def);
         }
 
         Ok(())
@@ -209,7 +209,7 @@ impl<'a> DefinitionsSection<'a> {
                             Bad::docspan(format!("prefix('{prefix}') or def name('{def_name}') not valid FQDN, err: '{err}'"), self.doc, &child_node.span())
                         )?;
 
-                    if !table.available_filters.insert(fqdn.clone()) {
+                    if !table.insert_filter(fqdn.clone()) {
                         return Err(Bad::docspan(
                             format!("Duplicate filter definition: '{}'", fqdn),
                             self.doc,
@@ -291,13 +291,13 @@ mod tests {
         let parser = DefinitionsSection::new(&doc);
         let table = parser.parse_node(&doc).expect("Parsing failed");
 
-        assert_eq!(table.plugins.len(), 2);
+        assert_eq!(table.get_plugins().len(), 2);
 
-        let local = table.plugins.get(&FQDN::from_str("local-wasm").unwrap()).unwrap();
+        let local = table.get_plugins().get(&FQDN::from_str("local-wasm").unwrap()).unwrap();
         assert_eq!(local.name, "local-wasm");
         assert_eq!(local.source, PluginSource::File(PathBuf::from("./assets/filter.wasm")));
 
-        let remote = table.plugins.get(&FQDN::from_str("remote-wasm").unwrap()).unwrap();
+        let remote = table.get_plugins().get(&FQDN::from_str("remote-wasm").unwrap()).unwrap();
         assert_eq!(remote.name, "remote-wasm");
         if let PluginSource::Url(u) = &remote.source {
             assert_eq!(u, "https://example.com/filter.wasm");
@@ -401,8 +401,8 @@ mod tests {
         let parser = DefinitionsSection::new(&doc);
         let table = parser.parse_node(&doc).unwrap();
 
-        assert!(table.available_filters.contains(&FQDN::from_str("river.inner.one").unwrap()));
-        assert!(table.available_filters.contains(&FQDN::from_str("river.inner.two").unwrap()));
+        assert!(table.get_available_filters().contains(&FQDN::from_str("river.inner.one").unwrap()));
+        assert!(table.get_available_filters().contains(&FQDN::from_str("river.inner.two").unwrap()));
     }
     
     const DUPLICATE_DEF_TEST: &str = r#"

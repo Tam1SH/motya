@@ -1,6 +1,8 @@
 
-use std::{collections::{HashMap, HashSet}, path::PathBuf};
+use std::{collections::{HashMap, HashSet}, hash::Hash, path::PathBuf};
 use fqdn::FQDN;
+
+use crate::proxy::filters::generate_registry::load_definitions_table;
 
 /// Definitions Table (Intermediate Representation).
 ///
@@ -24,7 +26,7 @@ pub struct DefinitionsTable {
     /// Used for **"Fail Fast" validation**: allows the application to crash with a clear error
     /// *before* the proxy starts if a chain references a filter that was not declared
     /// via `def` or `plugin`.
-    pub available_filters: HashSet<FQDN>,
+    available_filters: HashSet<FQDN>,
 
     /// A library of filter chain configurations.
     ///
@@ -37,15 +39,15 @@ pub struct DefinitionsTable {
     ///
     /// Stores information on *where* to retrieve the plugin code (File Path or URL),
     /// but does not hold the compiled code itself.
-    pub plugins: HashMap<FQDN, PluginDefinition>,
+    plugins: HashMap<FQDN, PluginDefinition>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FilterChain {
     pub filters: Vec<ConfiguredFilter>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConfiguredFilter {
     pub name: FQDN,
     pub args: HashMap<String, String>,
@@ -66,18 +68,40 @@ pub enum PluginSource {
 
 impl DefinitionsTable {
 
+    pub fn new(
+        available_filters: HashSet<FQDN>,
+        chains: HashMap<String, FilterChain>,
+        plugins: HashMap<FQDN, PluginDefinition>
+    ) -> Self {
+        Self { available_filters, chains, plugins }
+    }
+
+    pub fn new_with_global() -> Self {
+        load_definitions_table()
+    }
+
     pub fn get_chain_by_name(&self, name: &str) -> Option<FilterChain> {
         self.chains.get(name).cloned()
     }
 
-    pub fn insert_chain(&mut self, name: impl Into<String>, chain: FilterChain) {
-        self.chains.insert(name.into(), chain);
+    pub fn insert_filter(&mut self, filter_name: FQDN) -> bool {
+        self.available_filters.insert(filter_name)
+    }
+
+    pub fn insert_plugin(&mut self, name: FQDN, plugin: PluginDefinition) -> Option<PluginDefinition> {
+        self.plugins.insert(name, plugin)
+    }
+
+    pub fn insert_chain(&mut self, name: impl Into<String>, chain: FilterChain) -> Option<FilterChain> {
+        self.chains.insert(name.into(), chain)
     }
     
     pub fn extend_chain(&mut self, chains: HashMap<String, FilterChain>) {
         self.chains.extend(chains);
     }
 
+    pub fn get_plugins(&self) -> &HashMap<FQDN, PluginDefinition> { &self.plugins }
+    pub fn get_available_filters(&self) -> &HashSet<FQDN> { &self.available_filters }
     pub fn get_chains(&self) -> &HashMap<String, FilterChain> { &self.chains }
 
     pub fn merge(&mut self, other: DefinitionsTable) -> miette::Result<()> {
@@ -106,25 +130,15 @@ impl DefinitionsTable {
 
 }
 
-#[cfg(test)]
-impl DefinitionsTable {
-    pub fn new(
-        available_filters: HashSet<FQDN>,
-        chains: HashMap<String, FilterChain>,
-        plugins: HashMap<FQDN, PluginDefinition>
-    ) -> Self {
-        Self { available_filters, chains, plugins }
-    }
-}
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NamedFilterChain {
     pub name: String,
     pub chain: FilterChain
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Modificator {
     Chain(NamedFilterChain)
 }

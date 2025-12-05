@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::mpsc, thread};
+use std::{collections::HashMap, sync::{Arc, mpsc}, thread};
 
 use http::Uri;
 use pingora::{prelude::HttpPeer, server::Server};
@@ -40,7 +40,7 @@ pub async fn setup_filters() {
 
     definitions_table.insert_chain("insert", chain.clone());
 
-    let resolver = ChainResolver::new(definitions_table, registry).unwrap();
+    let resolver = ChainResolver::new(definitions_table, Arc::new(registry.into())).await.unwrap();
 
     let config = Config::default();
     
@@ -83,7 +83,7 @@ pub async fn setup_filters() {
 
     let mut app_server = Server::new_with_opt_and_conf(config.pingora_opt(), config.pingora_server_conf());
 
-    let proxy_service = river_proxy_service(proxy, &resolver, &app_server).unwrap();
+    let (proxy_service, _) = river_proxy_service(proxy, resolver, &app_server).await.unwrap();
 
     app_server.bootstrap();
     app_server.add_services(vec![proxy_service]);
@@ -130,7 +130,7 @@ pub async fn setup_check_cidr() -> thread::JoinHandle<()> {
 
     definitions_table.insert_chain("block-noob", chain.clone());
 
-    let resolver = ChainResolver::new(definitions_table, registry).unwrap();
+    let resolver = ChainResolver::new(definitions_table, Arc::new(registry.into())).await.unwrap();
 
     let config = Config::default();
     
@@ -168,7 +168,7 @@ pub async fn setup_check_cidr() -> thread::JoinHandle<()> {
 
     let mut app_server = Server::new_with_opt_and_conf(config.pingora_opt(), config.pingora_server_conf());
 
-    let proxy_service = river_proxy_service(proxy, &resolver, &app_server).unwrap();
+    let (proxy_service, _) = river_proxy_service(proxy, resolver, &app_server).await.unwrap();
 
     app_server.bootstrap();
     app_server.add_services(vec![proxy_service]);
@@ -217,7 +217,7 @@ pub async fn setup_check_cidr_accept() -> thread::JoinHandle<()> {
 
     definitions_table.insert_chain("block-noob", chain.clone());
 
-    let resolver = ChainResolver::new(definitions_table, registry).unwrap();
+    let resolver = ChainResolver::new(definitions_table, Arc::new(registry.into())).await.unwrap();
 
     let config = Config::default();
     
@@ -255,7 +255,7 @@ pub async fn setup_check_cidr_accept() -> thread::JoinHandle<()> {
 
     let mut app_server = Server::new_with_opt_and_conf(config.pingora_opt(), config.pingora_server_conf());
 
-    let proxy_service = river_proxy_service(proxy, &resolver, &app_server).unwrap();
+    let (proxy_service, _) = river_proxy_service(proxy, resolver, &app_server).await.unwrap();
 
     app_server.bootstrap();
     app_server.add_services(vec![proxy_service]);

@@ -1,4 +1,4 @@
-use std::{fs::File, path::PathBuf, sync::mpsc, thread, time::Duration};
+use std::{fs::File, path::PathBuf, sync::{Arc, mpsc}, thread, time::Duration};
 use criterion::{criterion_group, criterion_main, Criterion};
 use fqdn::fqdn;
 use pprof::ProfilerGuardBuilder;
@@ -59,7 +59,7 @@ async fn setup_filters() {
 
     definitions_table.insert_chain("insert", chain.clone());
 
-    let resolver = ChainResolver::new(definitions_table, registry).unwrap();
+    let resolver = ChainResolver::new(definitions_table, Arc::new(registry.into())).await.unwrap();
 
     let config = Config::default();
     
@@ -102,7 +102,7 @@ async fn setup_filters() {
 
     let mut app_server = Server::new_with_opt_and_conf(config.pingora_opt(), config.pingora_server_conf());
 
-    let proxy_service = river_proxy_service(proxy, &resolver, &app_server).unwrap();
+    let (proxy_service, _) = river_proxy_service(proxy, resolver, &app_server).await.unwrap();
 
     app_server.bootstrap();
     app_server.add_services(vec![proxy_service]);
@@ -127,9 +127,8 @@ async fn setup_filters() {
 
 fn criterion_benchmark(c: &mut Criterion) {
     
-    setup_filters();
+    tokio::runtime::Runtime::new().unwrap().block_on(setup_filters());
 
-    
     let client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(10))
         .pool_max_idle_per_host(100)

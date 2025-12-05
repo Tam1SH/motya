@@ -21,7 +21,7 @@ pub struct ListenerConfig {
     pub source: ListenerKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Listeners {
     pub list_cfgs: Vec<ListenerConfig>
 }

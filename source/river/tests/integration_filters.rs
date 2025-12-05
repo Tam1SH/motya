@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 use std::io::Write;
 use std::net::TcpListener;
-
+use river::config::builder::ConfigLoaderProvider;
 use http::Uri;
 use reqwest::Client;
 use river::config::builder::ConfigLoader;
@@ -88,22 +88,20 @@ async fn start_server_from_config_path(
     }]};
     definitions_table.insert_chain("filter-b", filter_b.clone());
 
-    let resolver = ChainResolver::new(definitions_table, registry).unwrap();
+    let resolver = ChainResolver::new(definitions_table.clone(), Arc::new(registry.into())).await.unwrap();
     let conf = Config::default(); 
     
-    let loader = ConfigLoader::new();
+    let loader = ConfigLoader::default();
 
-    let mut global_definitions = DefinitionsTable::default();
-    let mut registry = generate_registry::load_registry(&mut global_definitions);
     
-    let config = loader.load_entry_point(Some(config_path), &mut global_definitions, &mut registry).await
+    let config = loader.load_entry_point(Some(config_path.to_path_buf()), &mut definitions_table).await
         .unwrap()
         .unwrap();
 
     let proxy = config.basic_proxies.first().cloned().unwrap();
 
     let mut app_server = Server::new_with_opt_and_conf(conf.pingora_opt(), conf.pingora_server_conf());
-    let proxy_service = river_proxy_service(proxy, &resolver, &app_server).unwrap();
+    let (proxy_service, _) = river_proxy_service(proxy, resolver, &app_server).await.unwrap();
     app_server.bootstrap();
     app_server.add_services(vec![proxy_service]);
 

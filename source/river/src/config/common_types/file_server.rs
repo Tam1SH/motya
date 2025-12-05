@@ -5,7 +5,7 @@ use crate::config::common_types::listeners::Listeners;
 //
 // File Server Configuration
 //
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FileServerConfig {
     pub(crate) name: String,
     pub(crate) listeners: Listeners,

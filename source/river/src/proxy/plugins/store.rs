@@ -4,13 +4,11 @@ use fqdn::FQDN;
 use futures_util::future::join_all;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::Session;
-use tokio::sync::Mutex;
 use wasmtime::{Engine, Store, component::{Component, Linker}};
 use miette::{Context, Result, miette};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_io::IoView;
 
-use crate::proxy::plugins::host::HostFunctions;
 use crate::proxy::plugins::module::TraitModuleState;
 use crate::{
     config::common_types::definitions::{DefinitionsTable, PluginSource}, 
@@ -45,7 +43,7 @@ impl WasmPluginStore {
         
         let engine = Engine::default();
 
-        let futures = table.plugins.iter().map(|(name, def)| {
+        let futures = table.get_plugins().iter().map(|(name, def)| {
             let engine = engine.clone();
             let name = name.clone();
             let source = def.source.clone();

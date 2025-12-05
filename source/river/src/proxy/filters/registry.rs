@@ -53,6 +53,10 @@ impl FilterRegistry {
 
         factory(settings)
     }
+    
+    pub fn get_all_names(&self) -> Vec<FQDN> {
+        self.factories.keys().cloned().collect::<Vec<_>>()
+    }
 
     pub fn contains(&self, name: &FQDN) -> bool {
         self.factories.contains_key(name)
@@ -65,6 +69,7 @@ impl FilterRegistry {
 mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::str::FromStr;
+    use std::sync::Arc;
 
     use async_trait::async_trait;
 
@@ -126,18 +131,18 @@ mod tests {
         let mut definitions = DefinitionsTable::default();
         
         
-        assert!(definitions.available_filters.is_empty());
+        assert!(definitions.get_available_filters().is_empty());
 
         
         let _registry = load_registry(&mut definitions);
         
-        assert!(definitions.available_filters.contains(&FQDN::from_str("river.filters.block-cidr-range").unwrap()));
-        assert!(definitions.available_filters.contains(&FQDN::from_str("river.response.upsert-header").unwrap()));
-        assert!(definitions.available_filters.contains(&FQDN::from_str("river.response.remove-header").unwrap()));
-        assert!(definitions.available_filters.contains(&FQDN::from_str("river.request.upsert-header").unwrap()));
-        assert!(definitions.available_filters.contains(&FQDN::from_str("river.request.remove-header").unwrap()));
+        assert!(definitions.get_available_filters().contains(&FQDN::from_str("river.filters.block-cidr-range").unwrap()));
+        assert!(definitions.get_available_filters().contains(&FQDN::from_str("river.response.upsert-header").unwrap()));
+        assert!(definitions.get_available_filters().contains(&FQDN::from_str("river.response.remove-header").unwrap()));
+        assert!(definitions.get_available_filters().contains(&FQDN::from_str("river.request.upsert-header").unwrap()));
+        assert!(definitions.get_available_filters().contains(&FQDN::from_str("river.request.remove-header").unwrap()));
 
-        assert_eq!(definitions.available_filters.len(), 5);
+        assert_eq!(definitions.get_available_filters().len(), 5);
     }
 
 
@@ -147,8 +152,8 @@ mod tests {
         let mut definitions_table = DefinitionsTable::default();
 
         // Register available definitions (emulating `def name="..."`)
-        definitions_table.available_filters.insert(FQDN::from_str("river.req.add_header").unwrap());
-        definitions_table.available_filters.insert(FQDN::from_str("river.sec.block").unwrap());
+        definitions_table.insert_filter(FQDN::from_str("river.req.add_header").unwrap());
+        definitions_table.insert_filter(FQDN::from_str("river.sec.block").unwrap());
 
         // Construct the chain
         let mut header_args = HashMap::new();
@@ -173,9 +178,9 @@ mod tests {
 
         let registry = setup_registry();
 
-        let resolver = ChainResolver::new(definitions_table, registry).unwrap();
+        let resolver = ChainResolver::new(definitions_table, Arc::new(registry.into())).await.unwrap();
         
-        let chain = resolver.resolve("main_pipeline").expect("Chain not found");
+        let chain = resolver.resolve("main_pipeline").await.expect("Chain not found");
         
         assert_eq!(chain.actions.len(), 1, "Should have 1 action filter (block)");
         assert_eq!(chain.req_mods.len(), 1, "Should have 1 request modifier (add_header)");
@@ -187,12 +192,12 @@ mod tests {
         
         let mut definitions_table = DefinitionsTable::default();
 
-        definitions_table.available_filters.insert(FQDN::from_str("river.unknown_thing").unwrap());
+        definitions_table.insert_filter(FQDN::from_str("river.unknown_thing").unwrap());
 
         
         let registry = setup_registry();
 
-        let res = ChainResolver::new(definitions_table, registry);
+        let res = ChainResolver::new(definitions_table, Arc::new(registry.into())).await;
         
         assert!(res.is_err());
         let err_msg = res.err().unwrap().to_string();
@@ -211,7 +216,7 @@ mod tests {
         }));
         
         let mut table = DefinitionsTable::default();
-        table.available_filters.insert(FQDN::from_str("river.always_fail").unwrap());
+        table.insert_filter(FQDN::from_str("river.always_fail").unwrap());
         table.insert_chain("test", FilterChain {
             filters: vec![ConfiguredFilter {
                 name: FQDN::from_str("river.always_fail").unwrap(),
@@ -219,8 +224,8 @@ mod tests {
             }]
         });
 
-        let resolver = ChainResolver::new(table, reg).unwrap();
-        let err = resolver.resolve("test").err().unwrap();
+        let resolver = ChainResolver::new(table, Arc::new(reg.into())).await.unwrap();
+        let err = resolver.resolve("test").await.err().unwrap();
 
         assert!(err.to_string().contains("Failed to build filter 'river.always_fail' in chain 'test'"));
     }

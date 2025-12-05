@@ -7,16 +7,17 @@ use pingora_load_balancing::{Backend, Backends, LoadBalancer, discovery, prelude
 use crate::{config::{common_types::{connectors::{Upstream, UpstreamConfig}, definitions::Modificator}, internal::SelectionKind}, proxy::{filters::chain_resolver::ChainResolver, upstream_router::{Balancer, BalancerType, UpstreamContext}}};
 
 
-pub struct UpstreamFactory<'a> {
-    resolver: &'a ChainResolver,
+#[derive(Clone)]
+pub struct UpstreamFactory {
+    resolver: ChainResolver,
 }
 
-impl<'a> UpstreamFactory<'a> {
-    pub fn new(resolver: &'a ChainResolver) -> Self {
+impl UpstreamFactory {
+    pub fn new(resolver: ChainResolver) -> Self {
         Self { resolver }
     }
 
-    pub fn create_context(&self, config: UpstreamConfig) -> Result<UpstreamContext> {
+    pub async fn create_context(&self, config: UpstreamConfig) -> Result<UpstreamContext> {
         let addr = match &config.upstream {
             Upstream::Static(_) => &"0.0.0.0:0".parse().unwrap(),
             Upstream::Service(peer) => &peer.peer._address
@@ -52,7 +53,7 @@ impl<'a> UpstreamFactory<'a> {
         for modificator in config.chains {
             match modificator {
                 Modificator::Chain(named_chain) => {
-                    let chain = self.resolver.resolve(&named_chain.name)?;
+                    let chain = self.resolver.resolve(&named_chain.name).await?;
                     chains.push(chain);
                 }
             }

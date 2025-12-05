@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use async_recursion::async_recursion;
+use async_trait::async_trait;
 use kdl::KdlDocument;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use tokio::fs;
@@ -28,9 +29,6 @@ use crate::config::kdl::{
     utils,
 };
 
-use crate::proxy::filters::registry::FilterRegistry;
-use crate::proxy::plugins::store::WasmPluginStore;
-
 /// Orchestrates the loading and composition of the configuration from multiple KDL files.
 ///
 /// This loader implements a **Two-Pass Parsing** strategy to allow for cross-file references
@@ -45,8 +43,6 @@ use crate::proxy::plugins::store::WasmPluginStore;
 /// 2. **Phase 1: Definitions & Plugins**:
 ///    Iterates through *all* loaded documents to collect and merge `definitions` blocks.
 ///    - Parses named filter chains and plugin definitions.
-///    - Initializes the [`WasmPluginStore`] and downloads/compiles WASM modules.
-///    - Populates the global [`FilterRegistry`].
 ///
 /// 3. **Phase 2: System & Services**:
 ///    Iterates through the documents again to build the concrete configuration:
@@ -54,26 +50,21 @@ use crate::proxy::plugins::store::WasmPluginStore;
 ///    - **Services**: Aggregated from *all* documents.
 ///      - During service parsing, anonymous chains (e.g., `use-chain { ... }`) are detected
 ///        and registered into the global definitions table with generated names.
-///
-/// 4. **Compilation**:
-///    Finally, compiles all rules (both named and anonymous) into executable `RuntimeChain`s
-///    using the fully populated registry and definitions table.
+
+#[async_trait]
+pub trait ConfigLoaderProvider {
+    async fn load_entry_point(mut self, path: Option<PathBuf>, global_definitions: &mut DefinitionsTable) -> Result<Option<Config>>;
+}
+
+#[derive(Default, Clone)]
 pub struct ConfigLoader {
     documents: Vec<KdlDocument>,
     visited_paths: HashSet<PathBuf>,
 }
 
-impl ConfigLoader {
-    pub fn new() -> Self {
-        Self {
-            documents: Vec::new(),
-            visited_paths: HashSet::new(),
-        }
-    }
-
-    
-    pub async fn load_entry_point(mut self, path: Option<impl AsRef<Path>>, global_definitions: &mut DefinitionsTable, registry: &mut FilterRegistry) -> Result<Option<Config>> {
-
+#[async_trait]
+impl ConfigLoaderProvider for ConfigLoader {
+    async fn load_entry_point(mut self, path: Option<PathBuf>, global_definitions: &mut DefinitionsTable) -> Result<Option<Config>> {
         if let Some(path) = path {
             let root_path = std::fs::canonicalize(path)
                 .into_diagnostic()
@@ -81,13 +72,16 @@ impl ConfigLoader {
 
             self.load_recursive(root_path).await?;
 
-            Ok(Some(self.build_config(global_definitions, registry).await?))
+            Ok(Some(self.build_config(global_definitions).await?))
         }
         else {
             Ok(None)
         }
     }
+}
 
+impl ConfigLoader {
+    
     #[async_recursion]
     async fn load_recursive(&mut self, path: PathBuf) -> Result<()> {
         
@@ -133,7 +127,7 @@ impl ConfigLoader {
     }
 
     
-    async fn build_config(self, global_definitions: &mut DefinitionsTable, registry: &mut FilterRegistry) -> Result<Config> {
+    async fn build_config(self, global_definitions: &mut DefinitionsTable) -> Result<Config> {
         if self.documents.is_empty() {
             return Err(miette!("No configuration documents loaded"));
         }
@@ -193,13 +187,6 @@ impl ConfigLoader {
             final_config.file_servers.extend(file_servers);
         }
 
-        // ---------------------------------------------------------
-        // 4. Wasm compile
-        // ---------------------------------------------------------
-
-        let store = WasmPluginStore::compile(global_definitions).await?;
-        store.register_into(registry);
-        
         Ok(final_config)
     }
 }
@@ -368,18 +355,18 @@ mod tests {
         File::create(&main_path).unwrap()
             .write_all(MAIN_CONFIG.as_bytes()).unwrap();
 
-        let loader = ConfigLoader::new();
+        let loader = ConfigLoader::default();
         let mut def_table = DefinitionsTable::default();
-        let mut registry: FilterRegistry = generate_registry::load_registry(&mut def_table);
+        let _ = generate_registry::load_registry(&mut def_table);
 
-        loader.load_entry_point(Some(&main_path), &mut def_table, &mut registry).await.expect("Config should load successfully");
+        loader.load_entry_point(Some(main_path), &mut def_table).await.expect("Config should load successfully");
 
         assert!(
-            def_table.available_filters.contains(&fqdn!("river.inner.one")),
+            def_table.get_available_filters().contains(&fqdn!("river.inner.one")),
             "FQDN 'river.inner.one' is missing in global definitions"
         );
         assert!(
-            def_table.available_filters.contains(&fqdn!("river.inner.two")),
+            def_table.get_available_filters().contains(&fqdn!("river.inner.two")),
             "FQDN 'river.inner.two' is missing in global definitions"
         );
     }
@@ -432,11 +419,11 @@ mod tests {
         File::create(&main_path).unwrap()
             .write_all(MAIN_CONFIG.as_bytes()).unwrap();
 
-        let loader = ConfigLoader::new();
+        let loader = ConfigLoader::default();
         let mut def_table = DefinitionsTable::default();
-        let mut registry: FilterRegistry = generate_registry::load_registry(&mut def_table);
+        let _ = generate_registry::load_registry(&mut def_table);
 
-        let result = loader.load_entry_point(Some(&main_path), &mut def_table, &mut registry).await;
+        let result = loader.load_entry_point(Some(main_path), &mut def_table).await;
 
         assert!(result.is_err());
 
@@ -494,12 +481,12 @@ mod tests {
             .write_all(MAIN_CONFIG.as_bytes()).unwrap();
 
             
-        let loader = ConfigLoader::new();
+        let loader = ConfigLoader::default();
         let mut def_table = DefinitionsTable::default();
-        let mut registry: FilterRegistry = generate_registry::load_registry(&mut def_table);
+        let _ = generate_registry::load_registry(&mut def_table);
 
         
-        let result = loader.load_entry_point(Some(&main_path), &mut def_table, &mut registry).await;
+        let result = loader.load_entry_point(Some(main_path), &mut def_table).await;
 
         let err_msg = result.unwrap_err().to_string();
         crate::assert_err_contains!(err_msg, "Duplicate chain definition across files: 'conflict-chain'");
@@ -546,10 +533,10 @@ mod tests {
         
         writeln!(main_file, "{MAIN_FILE}").unwrap();
 
-        let loader = ConfigLoader::new();
+        let loader = ConfigLoader::default();
         let mut def_table = DefinitionsTable::default();
-        let mut registry: FilterRegistry = generate_registry::load_registry(&mut def_table);
-        let config = loader.load_entry_point(Some(&main_path), &mut def_table, &mut registry).await.expect("Failed to load config").unwrap();
+        let _ = generate_registry::load_registry(&mut def_table);
+        let config = loader.load_entry_point(Some(main_path), &mut def_table).await.expect("Failed to load config").unwrap();
 
         assert_eq!(config.threads_per_service, 2);
         assert_eq!(config.basic_proxies.len(), 1);

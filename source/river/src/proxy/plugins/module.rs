@@ -105,7 +105,8 @@ impl<T: TraitModuleState> WasmInvoker<T> {
     pub fn get_filter_type(&self) -> miette::Result<FilterType> {
         
         let state = T::default();
-
+        
+        //TODO: generate types instead of dry-run
         let filter_state = self.module.pick(&self.filter_name, &self.config, state)?
             .ok_or_else(|| miette!("Invariant violated: filter instance not found"))?;
 
