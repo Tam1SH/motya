@@ -54,11 +54,11 @@ pub async fn motya_proxy_service(
     let factory = UpstreamFactory::new(chain_resolver);
 
     MotyaProxyService::from_basic_conf(
-        conf.connectors.upstreams,  
-        &conf.rate_limiting,
+        conf.connectors.upstreams,
         &conf.listeners,
         factory,
-    server).await
+        server
+    ).await
 }
 
 
@@ -69,7 +69,6 @@ impl MotyaProxyService
     /// Create a new [MotyaProxyService] from the given [ProxyConfig]
     pub async fn from_basic_conf(
         upstream_configs: Vec<UpstreamContextConfig>,
-        rate_limiting: &RateLimitingConfig,
         listeners: &Listeners,
         upstream_factory: UpstreamFactory,
         server: &Server,

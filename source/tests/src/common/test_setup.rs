@@ -68,8 +68,7 @@ pub async fn setup_check_cidr() -> thread::JoinHandle<()> {
                 },
             }],
         },
-        name: "TestServer".to_string(),
-        rate_limiting: Default::default(),
+        name: "TestServer".to_string()
     };
 
     let mut app_server = Server::new_with_opt_and_conf(config.pingora_opt(), config.pingora_server_conf());
@@ -156,8 +155,7 @@ pub async fn setup_check_cidr_accept() -> thread::JoinHandle<()> {
                 },
             }],
         },
-        name: "TestServer".to_string(),
-        rate_limiting: Default::default(),
+        name: "TestServer".to_string()
     };
 
     let mut app_server = Server::new_with_opt_and_conf(config.pingora_opt(), config.pingora_server_conf());

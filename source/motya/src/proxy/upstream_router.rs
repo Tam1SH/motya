@@ -158,16 +158,15 @@ pub mod tests {
         
         let lb = LoadBalancer::<RoundRobin>::from_backends(backends);
         
-        todo!()
-        // MockUpstreamContext {
-        //     prefix: path.parse().unwrap(),
-        //     target: "/".parse().unwrap(),
-        //     matcher,
-        //     balancer: Balancer {
-        //         selector: |_, _| &[],
-        //         balancer_type: BalancerType::RoundRobin(lb),
-        //     },
-        // }
+        MockUpstreamContext {
+            prefix: path.parse().unwrap(),
+            target: "/".parse().unwrap(),
+            matcher,
+            balancer: Balancer {
+                selector: None,
+                balancer_type: BalancerType::RoundRobin(lb),
+            },
+        }
     }
 
 

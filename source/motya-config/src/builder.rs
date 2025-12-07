@@ -10,6 +10,7 @@ use tokio::fs;
 
 use crate::common_types::definitions_table::DefinitionsTable;
 use crate::internal::{Config, ProxyConfig};
+use crate::kdl::services::{ServiceConfig, ServicesSection};
 use crate::kdl::{
     includes::IncludesSection,
     connectors::ConnectorsSection,
@@ -40,15 +41,14 @@ use crate::common_types::{
 ///
 /// 2. **Phase 1: Definitions & Plugins**:
 ///    Iterates through *all* loaded documents to collect and merge `definitions` blocks.
-///    - Parses named filter chains and plugin definitions.
+///    - Parses named filter chains, plugin definitions and key-profiles for load-balancer.
 ///
 /// 3. **Phase 2: System & Services**:
 ///    Iterates through the documents again to build the concrete configuration:
 ///    - **System Data**: Extracted *only* from the entry point document.
 ///    - **Services**: Aggregated from *all* documents.
-///      - During service parsing, anonymous chains (e.g., `use-chain { ... }`) are detected
+///      - During service parsing, anonymous chains and key templates are detected
 ///        and registered into the global definitions table with generated names.
-
 #[async_trait]
 pub trait FileConfigLoaderProvider {
     async fn load_entry_point(mut self, path: Option<PathBuf>, global_definitions: &mut DefinitionsTable) -> Result<Option<Config>>;
@@ -157,131 +157,21 @@ impl ConfigLoader {
         // ---------------------------------------------------------
         // 3. Services Merge
         // ---------------------------------------------------------
-        let mut service_names = HashSet::new();
-
         for doc in &self.documents {
             if doc.get("services").is_none() {
                 continue;
             }
 
-            let (proxies, file_servers) = extract_services(
-                final_config.threads_per_service,
-                doc,
-                global_definitions
-            )?;
+            let services_config = ServicesSection::new(global_definitions)
+                .parse_node(doc)?;
 
-            for p in &proxies {
-                if !service_names.insert(p.name.clone()) {
-                    return Err(miette!("Duplicate service name found: '{}'", p.name));
-                }
-            }
-            for fs in &file_servers {
-                if !service_names.insert(fs.name.clone()) {
-                    return Err(miette!("Duplicate file-server name found: '{}'", fs.name));
-                }
-            }
-
-            final_config.basic_proxies.extend(proxies);
-            final_config.file_servers.extend(file_servers);
+            final_config.basic_proxies.extend(services_config.proxies);
+            final_config.file_servers.extend(services_config.file_servers);
         }
 
         Ok(final_config)
     }
 }
-
-fn extract_services(
-    threads_per_service: usize,
-    doc: &KdlDocument,
-    table: &mut DefinitionsTable
-) -> miette::Result<(Vec<ProxyConfig>, Vec<FileServerConfig>)> {
-    let service_node = utils::required_child_doc(doc, doc, "services")?;
-    let services = utils::wildcard_argless_child_docs(doc, service_node)?;
-
-    let proxy_node_set =
-        HashSet::from(["listeners", "connectors", "path-control", "rate-limiting"]);
-    let file_server_node_set = HashSet::from(["listeners", "file-server"]);
-
-    let mut proxies = vec![];
-    let mut file_servers = vec![];
-
-    for (name, service) in services {
-        // First, visit all of the children nodes, and make sure each child
-        // node only appears once. This is used to detect duplicate sections
-        let mut fingerprint_set: HashSet<&str> = HashSet::new();
-        for ch in service.nodes() {
-            let name = ch.name().value();
-            let dupe = !fingerprint_set.insert(name);
-            if dupe {
-                return Err(Bad::docspan(format!("Duplicate section: '{name}'!"), doc, &ch.span()).into());
-            }
-        }
-
-        // Now: what do we do with this node?
-        if fingerprint_set.is_subset(&proxy_node_set) {
-            // If the contained nodes are a strict subset of proxy node config fields,
-            // then treat this section as a proxy node
-            proxies.push(extract_service(threads_per_service, doc, name, service, table)?);
-        } else if fingerprint_set.is_subset(&file_server_node_set) {
-            // If the contained nodes are a strict subset of the file server config
-            // fields, then treat this section as a file server node
-            file_servers.push(FileServerSection::new(doc, name).parse_node(service)?);
-        } else {
-            // Otherwise, we're not sure what this node is supposed to be!
-            //
-            // Obtain the superset of ALL potential nodes, which is essentially
-            // our configuration grammar.
-            let superset: HashSet<&str> = proxy_node_set
-                .union(&file_server_node_set)
-                .cloned()
-                .collect();
-
-            // Then figure out what fields our fingerprint set contains that
-            // is "novel", or basically fields we don't know about
-            let what = fingerprint_set
-                .difference(&superset)
-                .copied()
-                .collect::<Vec<&str>>()
-                .join(", ");
-
-            // Then inform the user about the reason for our discontent
-            return Err(Bad::docspan(
-                format!("Unknown configuration section(s): '{what}'"),
-                doc,
-                &service.span(),
-            )
-            .into());
-        }
-    }
-
-    if proxies.is_empty() && file_servers.is_empty() {
-        return Err(Bad::docspan("No services defined", doc, &service_node.span()).into());
-    }
-
-    Ok((proxies, file_servers))
-}
-
-
-
-/// Extracts a single service from the `services` block
-fn extract_service(
-    threads_per_service: usize,
-    doc: &KdlDocument,
-    name: &str,
-    node: &KdlDocument,
-    table: &mut DefinitionsTable
-) -> miette::Result<ProxyConfig> {
-    let config = ServiceSection::<_>::new(
-        &ListenersSection::new(doc), 
-        &ConnectorsSection::new(doc, table),
-        &RateLimitSection::new(doc, threads_per_service), 
-        name
-    ).parse_node(node)?;
-
-    table.merge(config.connectors.anonymous_definitions.clone());
-
-    Ok(config)
-}
-
 
 #[cfg(test)]
 mod tests {

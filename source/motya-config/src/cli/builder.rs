@@ -125,8 +125,7 @@ impl CliConfigBuilder {
             connectors: Connectors {
                 upstreams,
                 anonymous_definitions: Default::default(),
-            },
-            rate_limiting: RateLimitingConfig::default(),
+            }
         };
 
         Ok(Config {

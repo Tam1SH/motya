@@ -16,7 +16,7 @@ use pingora::{
 
 use tracing::warn;
 use crate::{common_types::{
-    connectors::Connectors, definitions::KeyTemplateConfig, file_server::FileServerConfig, listeners::Listeners, path_control::PathControl, rate_limiter::RateLimitingConfig
+    connectors::Connectors, definitions::KeyTemplateConfig, file_server::FileServerConfig, listeners::Listeners, rate_limiter::RateLimitingConfig
 }};
 // use crate::proxy::request_selector::{RequestSelector, null_selector};
 
@@ -129,7 +129,7 @@ pub struct ProxyConfig {
     pub name: String,
     pub listeners: Listeners,
     pub connectors: Connectors,
-    pub rate_limiting: RateLimitingConfig,
+    // pub rate_limiting: RateLimitingConfig,
 }
 
 #[derive(Debug, PartialEq, Clone)]

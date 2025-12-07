@@ -185,8 +185,7 @@ mod tests {
                         })
                     }] 
                 },
-                name: "Test".to_string(),
-                rate_limiting: RateLimitingConfig::default()
+                name: "Test".to_string()
             }],
             ..Config::default()
         };

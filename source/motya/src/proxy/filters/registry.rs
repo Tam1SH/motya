@@ -53,10 +53,6 @@ impl FilterRegistry {
 
         factory(settings)
     }
-    
-    pub fn get_all_names(&self) -> Vec<FQDN> {
-        self.factories.keys().cloned().collect::<Vec<_>>()
-    }
 
     pub fn contains(&self, name: &FQDN) -> bool {
         self.factories.contains_key(name)

@@ -1,7 +1,6 @@
 pub mod bad;
 pub mod connectors;
 pub mod listeners;
-pub mod path_control;
 pub mod rate_limiter;
 pub mod definitions;
 pub mod system_data;
@@ -11,3 +10,4 @@ pub mod builtin_filters_name;
 pub mod section_parser;
 pub mod simple_response_type;
 pub mod definitions_table;
+pub mod services;

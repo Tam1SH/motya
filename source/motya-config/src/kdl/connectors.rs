@@ -526,7 +526,7 @@ impl<'a> ConnectorsSection<'a> {
         )?;
 
         let key_source = if let Some(template_name) = kv_args.get("use-key-profile") {
-            
+
             if let Some(template) = self.table.get_key_templates().get(template_name) {
                 Some(template.clone())
             }
@@ -652,6 +652,180 @@ mod tests {
 
         let conn_parser = ConnectorsSection::new(&doc, &table);
         conn_parser.parse_node(&doc)
+    }
+
+    
+    const LOAD_BALANCE_BASIC: &str = r#"
+        connectors {
+            load-balance {
+                selection "RoundRobin"
+                health-check "None"
+                discovery "Static"
+            }
+            proxy "http://127.0.0.1:8080"
+        }
+    "#;
+
+    #[test]
+    fn test_load_balance_basic() {
+        let connectors = parse_config(LOAD_BALANCE_BASIC).expect("Parsing failed");
+        
+        assert_eq!(connectors.upstreams.len(), 1);
+        let upstream = &connectors.upstreams[0];
+        
+        assert_eq!(upstream.lb_options.selection, SelectionKind::RoundRobin);
+        assert_eq!(upstream.lb_options.health_checks, HealthCheckKind::None);
+        assert_eq!(upstream.lb_options.discovery, DiscoveryKind::Static);
+        assert!(upstream.lb_options.template.is_none());
+    }
+
+    const LOAD_BALANCE_ALL_SELECTION_TYPES: &str = r#"
+        connectors {
+            load-balance {
+                selection "Random"
+            }
+            proxy "http://127.0.0.1:8080"
+        }
+    "#;
+
+    #[test]
+    fn test_load_balance_random_selection() {
+        let connectors = parse_config(LOAD_BALANCE_ALL_SELECTION_TYPES).expect("Parsing failed");
+        
+        let upstream = &connectors.upstreams[0];
+        assert_eq!(upstream.lb_options.selection, SelectionKind::Random);
+    }
+
+    const LOAD_BALANCE_FNV_HASH: &str = r#"
+        connectors {
+            load-balance {
+                selection "FNV" use-key-profile="ip-profile"
+            }
+            proxy "http://127.0.0.1:8080"
+        }
+    "#;
+
+    #[test]
+    fn test_load_balance_fnv_hash_with_key_profile() {
+        let result = parse_config(LOAD_BALANCE_FNV_HASH);
+        
+        assert!(result.is_err());
+    }
+
+    const LOAD_BALANCE_WITH_KEY_PROFILE: &str = r#"
+        definitions {
+            key-profiles {
+                template "ip-profile" {
+                    key "amogus"
+                }
+            }
+        }
+        
+        connectors {
+            load-balance {
+                selection "FNV" use-key-profile="ip-profile"
+            }
+            proxy "http://127.0.0.1:8080"
+        }
+    "#;
+
+    #[test]
+    fn test_load_balance_with_defined_key_profile() {
+
+        let connectors = parse_config(LOAD_BALANCE_WITH_KEY_PROFILE).expect("Parsing failed");
+        
+        let upstream = &connectors.upstreams[0];
+        assert_eq!(upstream.lb_options.selection, SelectionKind::FvnHash);
+        assert!(upstream.lb_options.template.is_some());
+        
+        let template = upstream.lb_options.template.as_ref().unwrap();
+        assert_eq!(template.source, "amogus".to_string());
+    }
+
+    const LOAD_BALANCE_HASH_WITHOUT_KEY_SOURCE: &str = r#"
+        connectors {
+            load-balance {
+                selection "Ketama"
+            }
+            proxy "http://127.0.0.1:8080"
+        }
+    "#;
+
+    #[test]
+    fn test_error_hash_selection_without_key_source() {
+        let result = parse_config(LOAD_BALANCE_HASH_WITHOUT_KEY_SOURCE);
+        assert!(result.is_err());
+        
+        let err_msg = result.unwrap_err().help().unwrap().to_string();
+        assert!(err_msg.contains("requires a key source"));
+    }
+
+    
+    const LOAD_BALANCE_INHERITANCE: &str = r#"
+        connectors {
+            load-balance {
+                selection "RoundRobin"
+            }
+            
+            section "/api" {
+                load-balance {
+                    selection "Random"
+                }
+                proxy "http://127.0.0.1:8081"
+            }
+            
+            section "/static" {
+                proxy "http://127.0.0.1:8082"
+            }
+        }
+    "#;
+
+    #[test]
+    fn test_load_balance_inheritance() {
+        let connectors = parse_config(LOAD_BALANCE_INHERITANCE).expect("Parsing failed");
+        
+        assert_eq!(connectors.upstreams.len(), 2);
+        
+        
+        let api_upstream = connectors.upstreams.iter()
+            .find(|u| match &u.upstream {
+                UpstreamConfig::Service(s) => s.prefix_path == "/api",
+                _ => false,
+            })
+            .expect("API upstream not found");
+        
+        assert_eq!(api_upstream.lb_options.selection, SelectionKind::Random);
+        
+        
+        let static_upstream = connectors.upstreams.iter()
+            .find(|u| match &u.upstream {
+                UpstreamConfig::Service(s) => s.prefix_path == "/static",
+                _ => false,
+            })
+            .expect("Static upstream not found");
+        
+        assert_eq!(static_upstream.lb_options.selection, SelectionKind::RoundRobin);
+    }
+
+    const LOAD_BALANCE_DUPLICATE: &str = r#"
+        connectors {
+            load-balance {
+                selection "RoundRobin"
+            }
+            load-balance {
+                selection "Random"
+            }
+            proxy "http://127.0.0.1:8080"
+        }
+    "#;
+
+    #[test]
+    fn test_error_duplicate_load_balance() {
+        let result = parse_config(LOAD_BALANCE_DUPLICATE);
+        assert!(result.is_err());
+        
+        let err_msg = result.unwrap_err().help().unwrap().to_string();
+        assert!(err_msg.contains("Duplicate 'load-balance' directive"));
     }
 
 

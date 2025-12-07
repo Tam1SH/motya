@@ -98,8 +98,7 @@ async fn setup_filters() {
                 },
             }],
         },
-        name: "TestServer".to_string(),
-        rate_limiting: Default::default(),
+        name: "TestServer".to_string()
     };
 
     let mut app_server = Server::new_with_opt_and_conf(config.pingora_opt(), config.pingora_server_conf());
