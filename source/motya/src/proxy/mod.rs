@@ -102,7 +102,7 @@ impl MotyaProxyService {
             Self {
                 state: shared_state.clone(),
             },
-            "ADADWDWDWDW",
+            "motya-proxy",
         );
 
         populate_listners(listeners, &mut my_proxy);
@@ -198,6 +198,7 @@ impl ProxyHttp for MotyaProxyService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
+        
         static DEFAULT: PathAndQuery = PathAndQuery::from_static("/");
 
         match ctx.router.pick_peer(
@@ -216,7 +217,6 @@ impl ProxyHttp for MotyaProxyService {
             Ok(None) => Err(pingora::Error::new(pingora::ErrorType::HTTPStatus(404))),
             Err(err) => {
                 let id = Uuid::new_v4();
-
                 tracing::error!("[{id}] error on pick_peer. err: {err}");
 
                 Err(pingora::Error::new(pingora::ErrorType::HTTPStatus(500)))

@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fqdn::fqdn;
 use pprof::ProfilerGuardBuilder;
 use reqwest::Client;
@@ -33,7 +33,7 @@ use motya::proxy::{
     motya_proxy_service,
 };
 
-async fn setup_filters() {
+async fn setup_filters() -> String {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
@@ -68,8 +68,15 @@ async fn setup_filters() {
         .unwrap();
 
     let config = Config::default();
-
-    let proxy_addr = "127.0.0.1:8080";
+    let proxy_port = {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    };
+    let proxy_addr = format!("127.0.0.1:{proxy_port}");
+    let url = format!("http://127.0.0.1:{proxy_port}/test");
 
     let chains = (1..100)
         .map(|_| {
@@ -128,10 +135,12 @@ async fn setup_filters() {
     });
 
     rx.recv().expect("Server failed to start");
+
+    url
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    tokio::runtime::Runtime::new()
+    let url = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(setup_filters());
 
@@ -141,7 +150,11 @@ fn criterion_benchmark(c: &mut Criterion) {
         .build()
         .unwrap();
 
-    let url = "http://127.0.0.1:8080/test";
+    let url = Box::leak(Box::new(url.as_str()));
+    
+    let mut group = c.benchmark_group("proxy_throughput");
+    
+    group.throughput(Throughput::Elements(1));
 
     let guard = ProfilerGuardBuilder::default()
         .frequency(1000)
@@ -149,19 +162,21 @@ fn criterion_benchmark(c: &mut Criterion) {
         .build()
         .unwrap();
 
-    c.bench_function("http_proxy_throughput", |b| {
+    group.bench_function("http_proxy_throughput", |b| {
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
                 let resp = client
-                    .get(url)
+                    .get(*url)
                     .send()
                     .await
                     .expect("Failed to send request");
-
+                
                 assert_eq!(resp.status(), 200);
             });
     });
 
+    group.finish(); 
+    
     if let Ok(report) = guard.report().build() {
         let file = File::create("flamegraph.svg").unwrap();
         report.flamegraph(file).unwrap();

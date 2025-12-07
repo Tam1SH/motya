@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use futures_util::FutureExt;
 use miette::{miette, Result};
 use pingora::prelude::HttpPeer;
 use pingora_load_balancing::{
@@ -96,6 +97,15 @@ impl UpstreamFactory {
                 ))
             }
         };
+        
+        match &balancer_type {
+            BalancerType::FNVHash(b) => b.update().now_or_never(),
+            BalancerType::KetamaHashing(b) => b.update().now_or_never(),
+            BalancerType::Random(b) => b.update().now_or_never(),
+            BalancerType::RoundRobin(b) => b.update().now_or_never()
+        }
+            .expect("static should not block")
+            .expect("static should not error");
 
         let mut chains = Vec::new();
 
