@@ -1,18 +1,17 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{
-    files::motya_file_server, fs_adapter::TokioFs, proxy::{
+    files::motya_file_server,
+    fs_adapter::TokioFs,
+    proxy::{
         filters::{chain_resolver::ChainResolver, generate_registry},
         motya_proxy_service,
         plugins::store::WasmPluginStore,
         upstream_factory::UpstreamFactory,
         watcher::file_watcher::ConfigWatcher,
-    }
+    },
 };
 
-use motya_config::{
-    internal::Config, kdl::fs_loader::FileCollector, loader::{ConfigLoader, FileConfigLoaderProvider}
-};
 use motya_config::{
     cli::{
         builder::CliConfigBuilder,
@@ -20,7 +19,18 @@ use motya_config::{
     },
     common_types::definitions_table::DefinitionsTable,
 };
-use pingora::{server::{Server, configuration::{Opt as PingoraOpt, ServerConf as PingoraServerConf}}, services::Service};
+use motya_config::{
+    internal::Config,
+    kdl::fs_loader::FileCollector,
+    loader::{ConfigLoader, FileConfigLoaderProvider},
+};
+use pingora::{
+    server::{
+        configuration::{Opt as PingoraOpt, ServerConf as PingoraServerConf},
+        Server,
+    },
+    services::Service,
+};
 
 use tokio::sync::Mutex;
 
@@ -35,7 +45,7 @@ fn resolve_config_path(cli: &Cli) -> PathBuf {
     if let Some(path) = &cli.config_entry {
         return path.clone();
     }
-    
+
     if let Ok(env_path) = std::env::var("MOTYA_CONFIG_PATH") {
         return env_path.into();
     }
@@ -214,7 +224,6 @@ fn apply_cli(conf: &mut Config, cli: &Cli) {
         conf.threads_per_service = *tps;
     }
 }
-
 
 /// Get the [`Opt`][PingoraOpt] field for Pingora
 pub fn pingora_opt(config: &Config) -> PingoraOpt {

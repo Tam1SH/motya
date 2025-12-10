@@ -3,12 +3,8 @@ use pingora::{Error, ErrorType, Result};
 use std::collections::{BTreeMap, HashMap};
 
 use crate::proxy::{
-    plugins::module::WasmModule,
-    RequestFilterMod,
-    RequestModifyMod,
-    ResponseModifyMod,
+    plugins::module::WasmModule, RequestFilterMod, RequestModifyMod, ResponseModifyMod,
 };
-
 
 pub enum FilterInstance {
     Action(Box<dyn RequestFilterMod>),

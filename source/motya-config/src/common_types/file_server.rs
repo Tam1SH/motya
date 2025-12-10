@@ -11,3 +11,9 @@ pub struct FileServerConfig {
     pub listeners: Listeners,
     pub base_path: Option<PathBuf>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileServerPartialConfig {
+    pub name: String,
+    pub base_path: Option<PathBuf>,
+}

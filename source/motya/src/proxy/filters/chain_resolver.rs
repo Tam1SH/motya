@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-
 #[derive(Default)]
 pub struct RuntimeChain {
     pub actions: Vec<Box<dyn RequestFilterMod>>,

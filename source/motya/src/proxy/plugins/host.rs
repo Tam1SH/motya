@@ -1,14 +1,8 @@
-use wasmtime::{
-    component::{Linker, LinkerInstance},
-};
+use wasmtime::component::{Linker, LinkerInstance};
 use wasmtime_wasi::WasiView;
 use wasmtime_wasi_io::IoView;
 
-use crate::proxy::plugins::{
-    module::TraitModuleState,
-    store::ModuleState,
-};
-
+use crate::proxy::plugins::{module::TraitModuleState, store::ModuleState};
 
 pub trait HostFunctions {
     fn get_path(&self) -> String;

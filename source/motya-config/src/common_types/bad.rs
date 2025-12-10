@@ -33,7 +33,7 @@ impl<T> OptExtParse for Option<T> {
         self,
         msg: impl Into<String>,
         doc: &KdlDocument,
-        span: &SourceSpan, 
+        span: &SourceSpan,
         source_name: impl AsRef<str>,
     ) -> miette::Result<Self::Good> {
         match self {
@@ -44,7 +44,12 @@ impl<T> OptExtParse for Option<T> {
 }
 
 impl Bad {
-    pub fn docspan(msg: impl Into<String>, doc: &KdlDocument, span: &SourceSpan, source_name: impl AsRef<str>) -> Self {
+    pub fn docspan(
+        msg: impl Into<String>,
+        doc: &KdlDocument,
+        span: &SourceSpan,
+        source_name: impl AsRef<str>,
+    ) -> Self {
         Self {
             error: msg.into(),
             src: NamedSource::new(source_name, doc.to_string()),

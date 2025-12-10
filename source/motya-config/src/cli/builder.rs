@@ -107,6 +107,8 @@ impl CliConfigBuilder {
                     UpstreamConfig::Service(HttpPeerConfig {
                         peer_address: socket_addr,
                         alpn: ALPN::H1,
+                        sni: String::new(),
+                        tls: false,
                         prefix_path,
                         target_path: uri.path().parse().into_diagnostic()?,
                         matcher: route.route_match.match_type,

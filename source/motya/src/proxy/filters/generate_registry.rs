@@ -1,10 +1,8 @@
-use crate::proxy::filters::registry::{FilterInstance, FilterRegistry, RegistryFilterContainer};
 use crate::proxy::filters::builtin::{
     cidr_range::CidrRangeFilter,
     request::{
         remove_headers::RemoveHeaderKeyRegex as RequestRemoveHeaderKeyRegex,
-        rewrite_path::RewritePathRegex,
-        strip_prefix::StripPrefix,
+        rewrite_path::RewritePathRegex, strip_prefix::StripPrefix,
         upsert_headers::UpsertHeader as RequestUpsertHeader,
     },
     response::{
@@ -12,9 +10,9 @@ use crate::proxy::filters::builtin::{
         upsert_header::UpsertHeader as ResponseUpsertHeader,
     },
 };
+use crate::proxy::filters::registry::{FilterInstance, FilterRegistry, RegistryFilterContainer};
 use motya_config::common_types::definitions_table::DefinitionsTable;
 use motya_config::define_builtin_filters;
-
 
 macro_rules! impl_registry_loader {
     (

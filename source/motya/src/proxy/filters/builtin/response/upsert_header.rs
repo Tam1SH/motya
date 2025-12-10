@@ -9,14 +9,12 @@ use crate::proxy::{
     MotyaContext,
 };
 
-
 pub struct UpsertHeader {
     key: String,
     value: String,
 }
 
 impl UpsertHeader {
-    
     pub fn from_settings(mut settings: BTreeMap<String, String>) -> Result<Self> {
         let key = extract_val("key", &mut settings)?;
         let value = extract_val("value", &mut settings)?;

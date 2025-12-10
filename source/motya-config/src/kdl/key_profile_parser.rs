@@ -1,148 +1,71 @@
-use std::collections::HashMap;
-
-use kdl::{KdlDocument, KdlEntry, KdlNode};
-
-use crate::common_types::{
-    bad::Bad,
-    definitions::{HashAlgorithm, KeyTemplateConfig, Transform},
+use crate::{
+    common_types::definitions::{HashAlgorithm, KeyTemplateConfig, Transform},
+    kdl::parser::{block::BlockParser, ctx::ParseContext},
 };
-use crate::kdl::utils::{self, HashMapValidationExt};
 
-pub struct KeyProfileParser<'a> {
-    name: &'a str
-}
+pub struct KeyProfileParser;
 
+impl KeyProfileParser {
+    pub fn parse(&self, ctx: ParseContext<'_>) -> miette::Result<KeyTemplateConfig> {
+        let mut block = BlockParser::new(ctx)?;
 
-impl<'a> KeyProfileParser<'a> {
-    pub fn new(name: &'a str) -> Self {
-        Self { name }
-    }
+        let (source, fallback) = block.required("key", |ctx| {
+            let source = ctx.first()?.as_str()?;
 
-    pub fn parse(&self, doc: &KdlDocument, node: &KdlDocument) -> miette::Result<KeyTemplateConfig> {
-        let mut key_source: Option<String> = None;
-        let mut fallback: Option<String> = None;
-        let mut algorithm: Option<HashAlgorithm> = None;
-        let mut transforms: Vec<Transform> = Vec::new();
+            let fallback = ctx
+                .args_map_with_only_keys(1.., &["fallback"])?
+                .get("fallback")
+                .map(|s| s.to_string());
 
-        let nodes = utils::data_nodes(doc, node)?;
-        for (child_node, name, args) in nodes {
-            match name {
-                "key" => {
-                    let (source, fb) = self.parse_key_directive(doc, child_node, args)?;
-                    key_source = Some(source);
-                    fallback = fb;
-                }
-                "algorithm" => {
-                    algorithm = Some(self.parse_algorithm_directive(doc, child_node, args)?);
-                }
-                "transforms-order" => {
-                    transforms = self.parse_transforms_order(doc, child_node)?;
-                }
-                _ => {
-                    return Err(Bad::docspan(
-                        format!("Unknown directive in key profile: '{name}'"),
-                        doc,
-                        &child_node.span(), self.name
-                    )
-                    .into())
-                }
-            }
-        }
-
-        let key_source = key_source.ok_or_else(|| {
-            Bad::docspan("Key profile must have 'key' directive", doc, &node.span(), self.name)
+            Ok((source, fallback))
         })?;
 
-        let algorithm = algorithm.unwrap_or_else(|| HashAlgorithm {
-            name: "xxhash64".to_string(),
-            seed: None,
-        });
+        let algorithm = block
+            .optional("algorithm", |c| {
+                let opts = c.args_map_with_only_keys(.., &["name", "seed"])?;
+
+                Ok(HashAlgorithm {
+                    name: opts.get("name").unwrap_or(&"xxhash64").to_string(),
+                    seed: opts.get("seed").map(|s| s.to_string()),
+                })
+            })?
+            .unwrap_or_else(|| HashAlgorithm {
+                name: "xxhash64".to_string(),
+                seed: None,
+            });
+
+        let transforms = block
+            .optional("transforms-order", |c| {
+                let mut steps = Vec::new();
+                for step_ctx in c.nodes()? {
+                    let name = step_ctx.name().unwrap_or("").to_string();
+                    let params = step_ctx
+                        .args_map(..)?
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect();
+
+                    steps.push(Transform { name, params });
+                }
+                Ok(steps)
+            })?
+            .unwrap_or_default();
+
+        block.exhaust()?;
 
         Ok(KeyTemplateConfig {
-            source: key_source,
+            source,
             fallback,
             algorithm,
             transforms,
         })
     }
-
-    fn parse_key_directive(
-        &self, 
-        doc: &KdlDocument,
-        node: &KdlNode,
-        args: &[KdlEntry],
-    ) -> miette::Result<(String, Option<String>)> {
-        let named_args = &args[1..];
-
-        let args_map = utils::str_str_args(doc, named_args, self.name)?
-            .into_iter()
-            .collect::<HashMap<&str, &str>>()
-            .ensure_only_keys(&["fallback"], doc, node, self.name)?;
-
-        let source = if let Some(entry) = args.first() {
-            entry
-                .value()
-                .as_string()
-                .ok_or_else(|| {
-                    Bad::docspan("key directive requires a string value", doc, &entry.span(), self.name)
-                })?
-                .to_string()
-        } else {
-            return Err(Bad::docspan("key directive requires a value", doc, &node.span(), self.name).into());
-        };
-
-        let fallback = args_map.get("fallback").map(|s| s.to_string());
-
-        Ok((source, fallback))
-    }
-
-    fn parse_algorithm_directive(
-        &self, 
-        doc: &KdlDocument,
-        node: &KdlNode,
-        args: &[KdlEntry],
-    ) -> miette::Result<HashAlgorithm> {
-        let args_map = utils::str_str_args(doc, args, self.name)?
-            .into_iter()
-            .collect::<HashMap<&str, &str>>()
-            .ensure_only_keys(&["name", "seed"], doc, node, self.name)?;
-
-        let name = args_map
-            .get("name")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "xxhash64".to_string());
-
-        let seed = args_map.get("seed").map(|s| s.to_string());
-
-        Ok(HashAlgorithm { name, seed })
-    }
-
-    fn parse_transforms_order(&self, doc: &KdlDocument, node: &KdlNode) -> miette::Result<Vec<Transform>> {
-        let children_doc = node.children().ok_or_else(|| {
-            Bad::docspan("transforms-order must have children", doc, &node.span(), self.name)
-        })?;
-
-        let mut transforms = Vec::new();
-        let nodes = utils::data_nodes(doc, children_doc)?;
-
-        for (_, name, args) in nodes {
-            let params = utils::str_str_args(doc, args, self.name)?
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-
-            transforms.push(Transform {
-                name: name.to_string(),
-                params,
-            });
-        }
-
-        Ok(transforms)
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::kdl::parser::ctx::Current;
+
     use super::*;
     use kdl::KdlDocument;
 
@@ -160,7 +83,8 @@ mod tests {
 
         let doc: KdlDocument = kdl_input.parse().unwrap();
 
-        let template = KeyProfileParser::new("test").parse(&doc, &doc).expect("Should parse");
+        let ctx = ParseContext::new(&doc, Current::Document(&doc), "test");
+        let template = KeyProfileParser.parse(ctx).expect("Should parse");
 
         assert_eq!(template.source, "${cookie_session}");
         assert_eq!(
@@ -185,7 +109,8 @@ mod tests {
         let kdl_input = r#"key "${uri_path}""#;
         let doc: KdlDocument = kdl_input.parse().unwrap();
 
-        let template = KeyProfileParser::new("test").parse(&doc, &doc).unwrap();
+        let ctx = ParseContext::new(&doc, Current::Document(&doc), "test");
+        let template = KeyProfileParser.parse(ctx).unwrap();
 
         assert_eq!(template.source, "${uri_path}");
         assert!(template.fallback.is_none());
@@ -199,13 +124,10 @@ mod tests {
         let kdl_input = r#"algorithm name="xxhash32""#;
         let doc: KdlDocument = kdl_input.parse().unwrap();
 
-        let result = KeyProfileParser::new("test").parse(&doc, &doc);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .help()
-            .unwrap()
-            .to_string()
-            .contains("Key profile must have 'key' directive"));
+        let ctx = ParseContext::new(&doc, Current::Document(&doc), "test");
+        let result = KeyProfileParser.parse(ctx);
+
+        let msg_err = result.unwrap_err().help().unwrap().to_string();
+        crate::assert_err_contains!(msg_err, "Missing required directive 'key'");
     }
 }

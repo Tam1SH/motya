@@ -1,14 +1,11 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 use crate::common_types::{
-    connectors::Connectors,
-    definitions::KeyTemplateConfig,
-    file_server::FileServerConfig,
+    connectors::Connectors, definitions::KeyTemplateConfig, file_server::FileServerConfig,
     listeners::Listeners,
 };
 
 use tracing::warn;
-
 
 /// Motya's internal configuration
 #[derive(Debug, Clone, PartialEq)]
@@ -24,8 +21,6 @@ pub struct Config {
 }
 
 impl Config {
-    
-
     pub fn validate(&self) {
         // This is currently mostly ad-hoc checks, we should potentially be a bit
         // more systematic about this.
@@ -61,7 +56,6 @@ impl Config {
         }
     }
 }
-
 
 //
 // Basic Proxy Configuration
@@ -100,6 +94,20 @@ pub enum SelectionKind {
     Random,
     FvnHash,
     KetamaHashing,
+}
+
+impl FromStr for SelectionKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "RoundRobin" => Ok(SelectionKind::RoundRobin),
+            "Random" => Ok(SelectionKind::Random),
+            "FNV" => Ok(SelectionKind::FvnHash),
+            "Ketama" => Ok(SelectionKind::KetamaHashing),
+            str => Err(format!("unknown selection kind, {str}")),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]

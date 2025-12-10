@@ -4,18 +4,18 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
 use http::uri::PathAndQuery;
-use pingora::{Result, prelude::HttpPeer, server::Server};
+use pingora::{prelude::HttpPeer, server::Server, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 use uuid::Uuid;
 
 use crate::proxy::{
+    context::{ContextInfo, SessionInfo},
+    filters::builtin::simple_response::SimpleResponse,
     filters::{
         chain_resolver::ChainResolver,
         types::{RequestFilterMod, RequestModifyMod, ResponseModifyMod},
     },
-    context::{ContextInfo, SessionInfo},
-    filters::builtin::simple_response::SimpleResponse,
     populate_listeners::populate_listners,
     upstream_factory::UpstreamFactory,
     upstream_router::{UpstreamContext, UpstreamRouter},
@@ -27,7 +27,6 @@ use motya_config::{
     },
     internal::ProxyConfig,
 };
-
 
 pub mod balancer;
 pub mod context;
@@ -198,7 +197,6 @@ impl ProxyHttp for MotyaProxyService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        
         static DEFAULT: PathAndQuery = PathAndQuery::from_static("/");
 
         match ctx.router.pick_peer(

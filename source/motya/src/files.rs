@@ -11,7 +11,6 @@ use static_files_module::{StaticFilesConf, StaticFilesHandler};
 
 use crate::proxy::populate_listeners::populate_listners;
 
-
 pub fn motya_file_server(
     conf: FileServerConfig,
     server: &Server,

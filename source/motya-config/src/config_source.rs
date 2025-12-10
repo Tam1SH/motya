@@ -1,7 +1,6 @@
-use std::path::PathBuf;
 use kdl::KdlDocument;
 use miette::Result;
-
+use std::path::PathBuf;
 
 #[allow(async_fn_in_trait)]
 pub trait ConfigSource: Send + Sync + Default + Clone {

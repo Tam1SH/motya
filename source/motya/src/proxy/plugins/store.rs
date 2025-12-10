@@ -13,12 +13,14 @@ use wasmtime_wasi_io::IoView;
 
 use crate::proxy::{
     filters::registry::{FilterRegistry, RegistryFilterContainer},
-    plugins::{host::PluginHost, module::{TraitModuleState, WasmModule}},
+    plugins::{
+        host::PluginHost,
+        module::{TraitModuleState, WasmModule},
+    },
 };
 use motya_config::common_types::{definitions::PluginSource, definitions_table::DefinitionsTable};
 
 use super::loader::PluginLoader;
-
 
 #[derive(Clone)]
 pub struct WasmArtifact {

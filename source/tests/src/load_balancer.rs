@@ -80,7 +80,7 @@ async fn test_load_balancer_round_robin_distribution() {
     let b1_str = format!("{}:{}", addr1.ip(), addr1.port());
     let b2_str = format!("{}:{}", addr2.ip(), addr2.port());
     let b3_str = format!("{}:{}", addr3.ip(), addr3.port());
-    
+
     let config_content = LB_CONFIG_TEMPLATE
         .replace("__PROXY_PORT__", &proxy_port.to_string())
         .replace("__BACKEND_1__", &b1_str)

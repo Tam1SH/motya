@@ -24,7 +24,6 @@ use crate::proxy::{
     upstream_router::UpstreamContext,
 };
 
-
 #[derive(Clone)]
 pub struct UpstreamFactory {
     resolver: ChainResolver,
@@ -36,15 +35,17 @@ impl UpstreamFactory {
     }
 
     pub async fn create_context(&self, config: UpstreamContextConfig) -> Result<UpstreamContext> {
-        
         let balancer = match &config.upstream {
             UpstreamConfig::Static(_) | UpstreamConfig::Service(_) => None,
-            UpstreamConfig::MultiServer(m) => if let Some(lb_options) = config.lb_options {
-                setup_balancer(lb_options, m)?
+            UpstreamConfig::MultiServer(m) => {
+                if let Some(lb_options) = config.lb_options {
+                    setup_balancer(lb_options, m)?
+                } else {
+                    None
+                }
             }
-            else { None }
         };
-        
+
         let mut chains = Vec::new();
 
         for modificator in config.chains {
@@ -67,10 +68,9 @@ impl UpstreamFactory {
 }
 
 fn setup_balancer(
-    lb_options: UpstreamOptions, 
-    m: &MultiServerUpstreamConfig
+    lb_options: UpstreamOptions,
+    m: &MultiServerUpstreamConfig,
 ) -> Result<Option<Balancer>, miette::Error> {
-
     let addrs = m.servers.iter().map(|s| (&s.address, s.weight));
     let mut backends = addrs
         .clone()
@@ -102,21 +102,19 @@ fn setup_balancer(
         SelectionKind::Random => {
             BalancerType::Random(LoadBalancer::<Random>::from_backends(Backends::new(disco)))
         }
-        SelectionKind::KetamaHashing => {
-            BalancerType::KetamaHashing(LoadBalancer::<KetamaHashing>::from_backends(
-                Backends::new(disco),
-            ))
-        }
+        SelectionKind::KetamaHashing => BalancerType::KetamaHashing(
+            LoadBalancer::<KetamaHashing>::from_backends(Backends::new(disco)),
+        ),
     };
     match &balancer_type {
         BalancerType::FNVHash(b) => b.update().now_or_never(),
         BalancerType::KetamaHashing(b) => b.update().now_or_never(),
         BalancerType::Random(b) => b.update().now_or_never(),
-        BalancerType::RoundRobin(b) => b.update().now_or_never()
+        BalancerType::RoundRobin(b) => b.update().now_or_never(),
     }
-        .expect("static should not block")
-        .expect("static should not error");
-    
+    .expect("static should not block")
+    .expect("static should not error");
+
     Ok(Some(Balancer {
         selector: lb_options
             .template

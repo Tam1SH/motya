@@ -14,13 +14,11 @@ use crate::proxy::{
     MotyaContext,
 };
 
-
 pub struct RemoveHeaderKeyRegex {
     regex: Regex,
 }
 
 impl RemoveHeaderKeyRegex {
-    
     pub fn from_settings(mut settings: BTreeMap<String, String>) -> Result<Self> {
         let mat = extract_val("pattern", &mut settings)?;
 

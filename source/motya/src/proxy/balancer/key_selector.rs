@@ -158,7 +158,7 @@ impl Balancer {
             //TODO: Profiling.
             let mut buffer = vec![];
             let key = selector.select(ctx, &mut buffer).unwrap_or(0);
-            
+
             self.select(&key.to_le_bytes())
         } else {
             self.select(&0u64.to_le_bytes())

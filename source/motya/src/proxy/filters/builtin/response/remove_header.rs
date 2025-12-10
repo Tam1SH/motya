@@ -13,13 +13,11 @@ use crate::proxy::{
     MotyaContext,
 };
 
-
 pub struct RemoveHeaderKeyRegex {
     regex: Regex,
 }
 
 impl RemoveHeaderKeyRegex {
-    
     pub fn from_settings(mut settings: BTreeMap<String, String>) -> Result<Self> {
         let mat = extract_val("pattern", &mut settings)?;
 
@@ -41,7 +39,6 @@ impl ResponseModifyMod for RemoveHeaderKeyRegex {
         header: &mut ResponseHeader,
         _ctx: &mut MotyaContext,
     ) {
-        
         let headers = header
             .headers
             .keys()
@@ -55,7 +52,6 @@ impl ResponseModifyMod for RemoveHeaderKeyRegex {
             })
             .collect::<Vec<_>>();
 
-            
         for h in headers {
             assert!(header.remove_header(&h).is_some());
         }

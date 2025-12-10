@@ -1,6 +1,5 @@
 use serde::Serialize;
 
-
 #[derive(Serialize, Debug)]
 pub struct DiagnosticError {
     pub file_path: String,

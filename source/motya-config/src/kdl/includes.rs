@@ -1,73 +1,57 @@
 use crate::{
-    common_types::{bad::Bad, section_parser::SectionParser},
-    kdl::utils,
+    common_types::section_parser::SectionParser,
+    kdl::parser::{
+        ctx::ParseContext,
+        ensures::Rule,
+    },
 };
-use kdl::KdlDocument;
+use miette::Result;
+use motya_macro::validate;
 
-pub struct IncludesSection<'a> {
-    doc: &'a KdlDocument,
-    name: &'a str
-}
+pub struct IncludesSection;
 
-impl SectionParser<KdlDocument, Vec<String>> for IncludesSection<'_> {
-    fn parse_node(&self, _node: &KdlDocument) -> miette::Result<Vec<String>> {
-        self.extract_includes()
+impl SectionParser<ParseContext<'_>, Vec<String>> for IncludesSection {
+    #[validate(ensure_node_name = "includes")]
+    fn parse_node(&self, ctx: ParseContext) -> miette::Result<Vec<String>> {
+        self.extract_includes(ctx)
     }
 }
 
-impl<'a> IncludesSection<'a> {
-    pub fn new(doc: &'a KdlDocument, name: &'a str) -> Self {
-        Self { doc, name }
-    }
+impl IncludesSection {
+    fn extract_includes(&self, ctx: ParseContext) -> Result<Vec<String>> {
+        let result = ctx
+            .req_nodes()?
+            .iter()
+            .map(|node| {
+                let path = node.name()?;
 
-    fn extract_includes(&self) -> miette::Result<Vec<String>> {
-        let mut paths = Vec::new();
+                node.validate(&[Rule::NoArgs, Rule::NoChildren])?;
 
-        if let Some(inc_block) = utils::optional_child_doc(self.doc, self.doc, "includes") {
-            
-            let nodes = utils::data_nodes(self.doc, inc_block)?;
+                Ok(path.to_string())
+            })
+            .collect::<Result<Vec<String>>>()?;
 
-            for (node, name, args) in nodes {
-                
-                if node.children().is_some() {
-                    return Err(Bad::docspan(
-                        format!("Includes directive must be a simple node with a single string argument (e.g., '{} \"path/to/file.kdl\"'), but it has a block.", name),
-                        self.doc,
-                        &node.span(),
-                        self.name
-                    ).into());
-                }
-
-                if !args.is_empty() {
-                    return Err(Bad::docspan(
-                        format!("Include path '{}' should not have additional arguments. Expected just a string path.", name),
-                        self.doc,
-                        &node.span(),
-                        self.name
-                    ).into());
-                }
-
-                paths.push(name.to_string());
-            }
-
-            if paths.is_empty() {
-                return Err(Bad::docspan(
-                    "The 'includes' block is present but contains no include paths. Expected nodes like 'path/to/file.kdl'.",
-                    self.doc,
-                    &inc_block.span(),
-                    self.name
-                ).into());
-            }
-        }
-
-        Ok(paths)
+        Ok(result)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_err_contains;
+    use crate::kdl::parser::block::BlockParser;
+    use crate::kdl::parser::ctx::Current;
     use kdl::KdlDocument;
+
+    fn parse_includes(input: &str) -> miette::Result<Vec<String>> {
+        let doc: KdlDocument = input.parse().unwrap();
+
+        let ctx = ParseContext::new(&doc, Current::Document(&doc), "test.kdl");
+        let mut block = BlockParser::new(ctx)?;
+
+        let includes = block.required("includes", |ctx| IncludesSection.parse_node(ctx))?;
+
+        Ok(includes)
+    }
 
     const VALID_INCLUDES: &str = r#"
     includes {
@@ -79,38 +63,12 @@ mod tests {
 
     #[test]
     fn test_valid_includes() {
-        let doc: KdlDocument = VALID_INCLUDES.parse().unwrap();
-        let parser = IncludesSection::new(&doc, "test.kdl");
-        let paths = parser.extract_includes().expect("Should parse valid includes");
+        let paths = parse_includes(VALID_INCLUDES).expect("Should parse valid includes");
 
         assert_eq!(paths.len(), 3);
         assert_eq!(paths[0], "path/to/first.kdl");
         assert_eq!(paths[1], "second.kdl");
         assert_eq!(paths[2], "../parent/config.kdl");
-    }
-
-    const NO_INCLUDES_SECTION: &str = r#"
-    system {
-        threads-per-service 2
-    }
-    
-    services {
-        TestService {
-            listeners { "127.0.0.1:8080" }
-            connectors {
-                return code="200" response="OK"
-            }
-        }
-    }
-    "#;
-
-    #[test]
-    fn test_no_includes_section() {
-        let doc: KdlDocument = NO_INCLUDES_SECTION.parse().unwrap();
-        let parser = IncludesSection::new(&doc, "test.kdl");
-        let paths = parser.extract_includes().expect("Should return empty vec");
-
-        assert!(paths.is_empty());
     }
 
     const EMPTY_INCLUDES_BLOCK: &str = r#"
@@ -119,16 +77,11 @@ mod tests {
 
     #[test]
     fn test_error_empty_includes_block() {
-        let doc: KdlDocument = EMPTY_INCLUDES_BLOCK.parse().unwrap();
-        let parser = IncludesSection::new(&doc, "test.kdl");
-        let result = parser.extract_includes();
+        let result = parse_includes(EMPTY_INCLUDES_BLOCK);
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().help().unwrap().to_string();
-        crate::assert_err_contains!(
-            err_msg,
-            "The 'includes' block is present but contains no include paths"
-        );
+        assert_err_contains!(err_msg, "Block 'includes' cannot be empty");
     }
 
     const INCLUDE_WITH_BLOCK_CHILDREN: &str = r#"
@@ -142,15 +95,12 @@ mod tests {
 
     #[test]
     fn test_error_include_with_block_children() {
-        let doc: KdlDocument = INCLUDE_WITH_BLOCK_CHILDREN.parse().unwrap();
-        let parser = IncludesSection::new(&doc, "test.kdl");
-        let result = parser.extract_includes();
+        let result = parse_includes(INCLUDE_WITH_BLOCK_CHILDREN);
 
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().help().unwrap().to_string();
-        crate::assert_err_contains!(
+        assert_err_contains!(
             err_msg,
-            "Includes directive must be a simple node with a single string argument"
+            "Directive 'with-block.kdl' must be a leaf node (no children block allowed)"
         );
     }
 
@@ -163,10 +113,7 @@ mod tests {
 
     #[test]
     fn test_error_include_with_multiple_args() {
-        let doc: KdlDocument = INCLUDE_WITH_MULTIPLE_ARGS.parse().unwrap();
-        let parser = IncludesSection::new(&doc, "test.kdl");
-        let result = parser.extract_includes();
-
+        let result = parse_includes(INCLUDE_WITH_MULTIPLE_ARGS);
         assert!(result.is_err());
     }
 
@@ -179,10 +126,7 @@ mod tests {
 
     #[test]
     fn test_error_include_with_named_arg() {
-        let doc: KdlDocument = INCLUDE_WITH_NAMED_ARG.parse().unwrap();
-        let parser = IncludesSection::new(&doc, "test.kdl");
-        let result = parser.extract_includes();
-
+        let result = parse_includes(INCLUDE_WITH_NAMED_ARG);
         assert!(result.is_err());
     }
 
@@ -200,7 +144,7 @@ mod tests {
         ServiceOne {
             listeners { "0.0.0.0:8080" }
             connectors {
-                return code="200" response="Service One"
+                return code=200 response="Service One"
             }
         }
     }
@@ -208,9 +152,7 @@ mod tests {
 
     #[test]
     fn test_includes_in_complex_document() {
-        let doc: KdlDocument = COMPLEX_DOCUMENT_WITH_INCLUDES.parse().unwrap();
-        let parser = IncludesSection::new(&doc, "main.kdl");
-        let paths = parser.extract_includes().expect("Should parse includes");
+        let paths = parse_includes(COMPLEX_DOCUMENT_WITH_INCLUDES).expect("Should parse includes");
 
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], "definitions.kdl");
@@ -230,9 +172,7 @@ mod tests {
 
     #[test]
     fn test_includes_with_comments() {
-        let doc: KdlDocument = INCLUDE_WITH_COMMENTS.parse().unwrap();
-        let parser = IncludesSection::new(&doc, "test.kdl");
-        let paths = parser.extract_includes().expect("Should ignore comments");
+        let paths = parse_includes(INCLUDE_WITH_COMMENTS).expect("Should ignore comments");
 
         assert_eq!(paths.len(), 3);
         assert_eq!(paths[0], "dev/overrides.kdl");
@@ -251,9 +191,8 @@ mod tests {
 
     #[test]
     fn test_includes_with_special_characters() {
-        let doc: KdlDocument = INCLUDE_WITH_SPECIAL_CHARACTERS.parse().unwrap();
-        let parser = IncludesSection::new(&doc, "test.kdl");
-        let paths = parser.extract_includes().expect("Should parse paths with special chars");
+        let paths = parse_includes(INCLUDE_WITH_SPECIAL_CHARACTERS)
+            .expect("Should parse paths with special chars");
 
         assert_eq!(paths.len(), 4);
         assert_eq!(paths[0], "path with spaces.kdl");

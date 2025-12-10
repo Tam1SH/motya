@@ -27,11 +27,12 @@ pub enum RouteMatcher {
 pub struct HttpPeerConfig {
     pub peer_address: SocketAddr,
     pub alpn: ALPN,
+    pub tls: bool,
+    pub sni: String,
     pub prefix_path: PathAndQuery,
     pub target_path: PathAndQuery,
     pub matcher: RouteMatcher,
 }
-
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]

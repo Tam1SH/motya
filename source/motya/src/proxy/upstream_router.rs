@@ -77,9 +77,10 @@ impl<TUpstream: UpstreamContextTrait> UpstreamRouter<TUpstream> {
                     .cloned()
                     .expect("HttpPeer should exist in backend.ext"),
             ))
-        }
-        else {
-            let peer = upstream.get_peer().expect("HttpPeer should exist in UpstreamConfig::Service");
+        } else {
+            let peer = upstream
+                .get_peer()
+                .expect("HttpPeer should exist in UpstreamConfig::Service");
             Ok(Some(peer.clone()))
         }
     }
@@ -88,7 +89,6 @@ impl<TUpstream: UpstreamContextTrait> UpstreamRouter<TUpstream> {
         self.router.at(path).ok().map(|v| v.value)
     }
 }
-
 
 impl UpstreamContextTrait for UpstreamContext {
     fn get_prefix_path(&self) -> &PathAndQuery {
@@ -116,8 +116,10 @@ impl UpstreamContextTrait for UpstreamContext {
     // MultiServer - processing is delegated to the load balancer.
     fn get_peer(&self) -> Option<HttpPeer> {
         match &self.upstream {
-            UpstreamConfig::Service(s) => Some(HttpPeer::new(s.peer_address, false, "".to_string())),
-            _ => None
+            UpstreamConfig::Service(s) => {
+                Some(HttpPeer::new(s.peer_address, false, "".to_string()))
+            }
+            _ => None,
         }
     }
 }
@@ -129,7 +131,7 @@ pub mod tests {
     pub struct MockUpstreamContext {
         pub prefix: PathAndQuery,
         pub matcher: RouteMatcher,
-        pub peer: HttpPeer
+        pub peer: HttpPeer,
     }
 
     impl UpstreamContextTrait for MockUpstreamContext {
@@ -150,11 +152,10 @@ pub mod tests {
     }
 
     fn mock_context(path: &str, matcher: RouteMatcher) -> MockUpstreamContext {
-
         MockUpstreamContext {
             prefix: path.parse().unwrap(),
             matcher,
-            peer: HttpPeer::new("0.0.0.0:0", false, "".to_string())
+            peer: HttpPeer::new("0.0.0.0:0", false, "".to_string()),
         }
     }
 

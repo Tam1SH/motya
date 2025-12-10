@@ -5,7 +5,6 @@ use pingora_proxy::Session;
 
 use crate::proxy::MotyaContext;
 
-
 /// This is a single-serving trait for modifiers that provide actions for
 /// [ProxyHttp::upstream_response_filter] methods
 pub trait ResponseModifyMod: Send + Sync {

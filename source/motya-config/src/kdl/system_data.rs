@@ -1,252 +1,176 @@
+use crate::block_parser;
 use crate::common_types::system_data::HttpProviderConfig;
-use crate::{
-    common_types::{
-        bad::{Bad, OptExtParse},
-        section_parser::SectionParser,
-        system_data::{ConfigProvider, FilesProviderConfig, S3ProviderConfig, SystemData},
-    },
-    kdl::utils::{self, HashMapValidationExt},
+use crate::common_types::{
+    section_parser::SectionParser,
+    system_data::{ConfigProvider, FilesProviderConfig, S3ProviderConfig, SystemData},
 };
-use kdl::{KdlDocument, KdlEntry, KdlNode};
+use crate::kdl::parser::ctx::ParseContext;
+use crate::kdl::parser::ensures::Rule;
+use crate::kdl::parser::utils::{OptionTypedValueExt, PrimitiveType};
+use http::uri::PathAndQuery;
+use motya_macro::validate;
+use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::{collections::HashMap, net::SocketAddr};
 
-pub struct SystemDataSection<'a> {
-    doc: &'a KdlDocument,
-    name: &'a str
-}
+pub struct SystemDataSection;
 
-impl SectionParser<KdlDocument, Option<SystemData>> for SystemDataSection<'_> {
-    fn parse_node(&self, _: &KdlDocument) -> miette::Result<Option<SystemData>> {
-        self.extract_system_data()
+impl SectionParser<ParseContext<'_>, Option<SystemData>> for SystemDataSection {
+    #[validate(ensure_node_name = "system")]
+    fn parse_node(&self, ctx: ParseContext) -> miette::Result<Option<SystemData>> {
+        self.extract_system_data(ctx)
     }
 }
 
-impl<'a> SystemDataSection<'a> {
-    pub fn new(doc: &'a KdlDocument, name: &'a str) -> Self {
-        Self { doc, name }
-    }
-
-    fn extract_system_data(&self) -> miette::Result<Option<SystemData>> {
-        let Some(sys) = utils::optional_child_doc(self.doc, self.doc, "system") else {
-            return Ok(None);
-        };
-
-        let tps = self.extract_threads_per_service(sys)?;
-
-        let daemonize = if let Some(n) = sys.get("daemonize") {
-            utils::extract_one_bool_arg(self.doc, n, "daemonize", n.entries(), self.name)?
-        } else {
-            false
-        };
-
-        let upgrade_socket = if let Some(n) = sys.get("upgrade-socket") {
-            let x = utils::extract_one_str_arg(self.doc, n, "upgrade-socket", n.entries(), self.name, |s| {
-                Some(PathBuf::from(s))
-            })?;
-            Some(x)
-        } else {
-            None
-        };
-
-        let pid_file = if let Some(n) = sys.get("pid-file") {
-            let x = utils::extract_one_str_arg(self.doc, n, "pid-file", n.entries(), self.name, |s| {
-                Some(PathBuf::from(s))
-            })?;
-            Some(x)
-        } else {
-            None
-        };
-
-        let provider = self.extract_provider_config(sys)?;
+impl SystemDataSection {
+    fn extract_system_data(&self, ctx: ParseContext) -> miette::Result<Option<SystemData>> {
+        block_parser!(
+            ctx,
+            tps: optional("threads-per-service") => |ctx| self.parse_threads_per_service(ctx),
+            daemonize: optional("daemonize") => |ctx| self.parse_daemonize(ctx),
+            upgrade: optional("upgrade-socket") => |ctx| self.parse_upgrade_socket(ctx),
+            pid: optional("pid-file") => |ctx| self.parse_pid_file(ctx),
+            provider: optional("providers") => |ctx| self.parse_providers(ctx)
+        );
 
         Ok(Some(SystemData {
-            threads_per_service: tps,
-            daemonize,
-            upgrade_socket,
-            pid_file,
+            threads_per_service: tps.unwrap_or(8),
+            daemonize: daemonize.unwrap_or(false),
+            upgrade_socket: upgrade,
+            pid_file: pid,
             provider,
         }))
     }
 
-    fn extract_threads_per_service(&self, sys: &KdlDocument) -> miette::Result<usize> {
-        let Some(tps) = sys.get("threads-per-service") else {
-            return Ok(8);
-        };
+    //Procedural macros are crying because of you...
+    fn parse_threads_per_service(&self, ctx: ParseContext<'_>) -> miette::Result<usize> {
+        ctx.validate(&[Rule::NoChildren, Rule::ExactArgs(1)])?;
 
-        let [tps_node] = tps.entries() else {
-            return Err(Bad::docspan(
-                "system > threads-per-service should have exactly one entry",
-                self.doc,
-                &tps.span(), self.name
-            )
-            .into());
-        };
-
-        let val = tps_node.value().as_integer().or_bail(
-            "system > threads-per-service should be an integer",
-            self.doc,
-            &tps_node.span(), self.name
-        )?;
-        val.try_into().ok().or_bail(
-            "system > threads-per-service should fit in a usize",
-            self.doc,
-            &tps_node.span(), self.name
-        )
+        ctx.first()?.as_usize()
     }
 
-    fn extract_provider_config(&self, sys: &KdlDocument) -> miette::Result<Option<ConfigProvider>> {
-        let Some(providers_doc) = utils::optional_child_doc(self.doc, sys, "providers") else {
-            return Ok(None);
-        };
+    fn parse_daemonize(&self, ctx: ParseContext<'_>) -> miette::Result<bool> {
+        ctx.validate(&[Rule::NoChildren, Rule::ExactArgs(1)])?;
+        ctx.first()?.as_bool()
+    }
 
-        let nodes = utils::data_nodes(self.doc, providers_doc)?;
+    fn parse_upgrade_socket(&self, ctx: ParseContext<'_>) -> miette::Result<PathBuf> {
+        ctx.validate(&[Rule::NoChildren, Rule::ExactArgs(1)])?;
 
-        if nodes.is_empty() {
-            return Ok(None);
-        }
+        ctx.first()?.parse_as::<PathBuf>()
+    }
 
-        if nodes.len() > 1 {
-            let (node, _, _) = nodes[1];
-            return Err(Bad::docspan(
-                "Multiple providers defined. Only one configuration provider is allowed at a time.",
-                self.doc,
-                &node.span(), self.name
-            )
-            .into());
-        }
+    fn parse_pid_file(&self, ctx: ParseContext<'_>) -> miette::Result<PathBuf> {
+        ctx.validate(&[Rule::NoChildren, Rule::ExactArgs(1)])?;
 
-        let (node, name, args) = nodes[0];
+        ctx.first()?.parse_as::<PathBuf>()
+    }
 
-        let mut args_map = utils::str_value_args(self.doc, args, self.name)?
-            .into_iter()
-            .collect::<HashMap<&str, &KdlEntry>>();
+    fn parse_providers(&self, providers_ctx: ParseContext<'_>) -> miette::Result<ConfigProvider> {
+        providers_ctx.validate(&[Rule::ReqChildren, Rule::NoArgs])?;
 
-        match name {
-            "files" => {
-                args_map = args_map.ensure_only_keys(&["watch"], self.doc, node, self.name)?;
-
-                let watch = self.opt_bool("watch", &args_map, false)?;
-
-                Ok(Some(ConfigProvider::Files(FilesProviderConfig { watch })))
-            }
-            "s3" => {
-                args_map = args_map.ensure_only_keys(
-                    &["bucket", "key", "region", "interval", "endpoint"],
-                    self.doc,
-                    node,
-                    self.name
-                )?;
-
-                let bucket = self.req_str("bucket", &args_map, node)?;
-                let key = self.req_str("key", &args_map, node)?;
-                let region = self.req_str("region", &args_map, node)?;
-
-                let interval = self.opt_str("interval", &args_map)?
-                    .unwrap_or_else(|| "60s".to_string());
-                let endpoint = self.opt_str("endpoint", &args_map)?;
-
-                Ok(Some(ConfigProvider::S3(S3ProviderConfig {
-                    bucket,
-                    key,
-                    region,
-                    interval,
-                    endpoint,
-                })))
-            }
-            "http" => {
-                args_map =
-                    args_map.ensure_only_keys(&["address", "path", "persist"], self.doc, node, self.name)?;
-
-                let addr_str = self.req_str("address", &args_map, node)?;
-                let address: SocketAddr = addr_str.parse().map_err(|e| {
-                    Bad::docspan(
-                        format!("Invalid address format: {e}"),
-                        self.doc,
-                        &node.span(), self.name
-                    )
-                })?;
-
-                let path = self.req_str("path", &args_map, node)?;
-                if !path.starts_with('/') {
-                    return Err(
-                        Bad::docspan("Path must start with '/'", self.doc, &node.span(), self.name).into(),
-                    );
+        block_parser!(
+            providers_ctx.enter_block()?,
+            provider: required_any(&["files", "s3", "http"]) => |ctx, name| {
+                match name {
+                    "files" => self.parse_files_provider(ctx),
+                    "s3" => self.parse_s3_provider(ctx),
+                    "http" => self.parse_http_provider(ctx),
+                    _ => unreachable!("Guaranteed by BlockParser"),
                 }
-
-                let persist = self.opt_bool("persist", &args_map, false)?;
-
-                Ok(Some(ConfigProvider::Http(HttpProviderConfig {
-                    address,
-                    path,
-                    persist,
-                })))
             }
-            unknown => Err(Bad::docspan(
-                format!("Unknown provider type: '{unknown}'. Supported: 'files', 's3', 'http'"),
-                self.doc,
-                &node.span(), self.name
-            )
-            .into()),
-        }
+        );
+
+        Ok(provider)
     }
 
-    fn req_str(
-        &self,
-        key: &str,
-        map: &HashMap<&str, &KdlEntry>,
-        parent: &KdlNode,
-    ) -> miette::Result<String> {
-        let entry = map.get(key).or_bail(
-            format!("Missing required argument: '{key}'"),
-            self.doc,
-            &parent.span(), self.name
-        )?;
-        entry.value().as_string().map(|s| s.to_string()).or_bail(
-            format!("'{key}' must be a string"),
-            self.doc,
-            &entry.span(), self.name
-        )
+    fn parse_files_provider(&self, ctx: ParseContext<'_>) -> miette::Result<ConfigProvider> {
+        ctx.validate(&[
+            Rule::NoChildren,
+            Rule::NoPositionalArgs,
+            Rule::OnlyKeysTyped(&[("watch", PrimitiveType::Bool)]),
+        ])?;
+
+        let watch = ctx.opt_prop("watch")?.as_bool()?.unwrap_or(false);
+        Ok(ConfigProvider::Files(FilesProviderConfig { watch }))
     }
 
-    fn opt_str(
-        &self,
-        key: &str,
-        map: &HashMap<&str, &KdlEntry>,
-    ) -> miette::Result<Option<String>> {
-        if let Some(entry) = map.get(key) {
-            let s = entry.value().as_string().map(|s| s.to_string()).or_bail(
-                format!("'{key}' must be a string"),
-                self.doc,
-                &entry.span(), self.name
-            )?;
-            Ok(Some(s))
-        } else {
-            Ok(None)
-        }
+    fn parse_s3_provider(&self, ctx: ParseContext<'_>) -> miette::Result<ConfigProvider> {
+        ctx.validate(&[
+            Rule::NoChildren,
+            Rule::NoPositionalArgs,
+            Rule::OnlyKeysTyped(&[
+                ("bucket", PrimitiveType::String),
+                ("key", PrimitiveType::String),
+                ("region", PrimitiveType::String),
+                ("interval", PrimitiveType::String),
+                ("endpoint", PrimitiveType::String),
+            ]),
+        ])?;
+
+        let bucket = ctx.prop("bucket")?.as_str()?;
+        let key = ctx.prop("key")?.as_str()?;
+        let region = ctx.prop("region")?.as_str()?;
+
+        let interval = ctx
+            .opt_prop("interval")?
+            .as_str()?
+            .unwrap_or_else(|| "60s".to_string());
+
+        let endpoint = ctx.opt_prop("endpoint")?.as_str()?;
+
+        Ok(ConfigProvider::S3(S3ProviderConfig {
+            bucket,
+            key,
+            region,
+            interval,
+            endpoint,
+        }))
     }
 
-    fn opt_bool(
-        &self,
-        key: &str,
-        map: &HashMap<&str, &KdlEntry>,
-        default: bool,
-    ) -> miette::Result<bool> {
-        if let Some(entry) = map.get(key) {
-            entry.value().as_bool().or_bail(
-                format!("'{key}' must be a boolean"),
-                self.doc,
-                &entry.span(), self.name
-            )
-        } else {
-            Ok(default)
-        }
+    fn parse_http_provider(&self, ctx: ParseContext<'_>) -> miette::Result<ConfigProvider> {
+        ctx.validate(&[
+            Rule::NoChildren,
+            Rule::NoPositionalArgs,
+            Rule::OnlyKeysTyped(&[
+                ("address", PrimitiveType::String),
+                ("path", PrimitiveType::String),
+                ("persist", PrimitiveType::Bool),
+            ]),
+        ])?;
+
+        let addr_str = ctx.prop("address")?.as_str()?;
+        let address: SocketAddr = addr_str
+            .parse()
+            .map_err(|e| ctx.error(format!("Invalid address format: {e}")))?;
+
+        let path = ctx.prop("path")?.parse_as::<PathAndQuery>()?;
+
+        let persist = ctx.opt_prop("persist")?.as_bool()?.unwrap_or(false);
+
+        Ok(ConfigProvider::Http(HttpProviderConfig {
+            address,
+            path,
+            persist,
+        }))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_err_contains;
+    use crate::kdl::parser::block::BlockParser;
+    use crate::kdl::parser::ctx::Current;
+    use kdl::KdlDocument;
+
+    fn parse_system(input: &str) -> miette::Result<SystemData> {
+        let doc: KdlDocument = input.parse().unwrap();
+        let ctx = ParseContext::new(&doc, Current::Document(&doc), "test");
+        let mut block = BlockParser::new(ctx)?;
+
+        let data = block.required("system", |ctx| SystemDataSection.extract_system_data(ctx))?;
+
+        data.ok_or_else(|| miette::miette!("System section parsed but returned None"))
+    }
 
     #[test]
     fn test_files_provider() {
@@ -257,9 +181,8 @@ mod tests {
             }
         }
         "#;
-        let doc: KdlDocument = input.parse().unwrap();
-        let parser = SystemDataSection::new(&doc, "test");
-        let data = parser.extract_system_data().expect("Should parse files").unwrap();
+
+        let data = parse_system(input).expect("Should parse files");
 
         if let Some(ConfigProvider::Files(cfg)) = data.provider {
             assert!(cfg.watch);
@@ -277,9 +200,8 @@ mod tests {
             }
         }
         "#;
-        let doc: KdlDocument = input.parse().unwrap();
-        let parser = SystemDataSection::new(&doc, "test");
-        let data = parser.extract_system_data().expect("Should parse s3").unwrap();
+
+        let data = parse_system(input).expect("Should parse s3");
 
         if let Some(ConfigProvider::S3(cfg)) = data.provider {
             assert_eq!(cfg.bucket, "configs");
@@ -301,11 +223,8 @@ mod tests {
             }
         }
         "#;
-        let doc: KdlDocument = input.parse().unwrap();
-        let parser = SystemDataSection::new(&doc, "test");
-        let data = parser
-            .extract_system_data()
-            .expect("Should parse minimal s3").unwrap();
+
+        let data = parse_system(input).expect("Should parse minimal s3");
 
         if let Some(ConfigProvider::S3(cfg)) = data.provider {
             assert_eq!(cfg.region, "eu-central-1");
@@ -325,9 +244,8 @@ mod tests {
             }
         }
         "#;
-        let doc: KdlDocument = input.parse().unwrap();
-        let parser = SystemDataSection::new(&doc, "test");
-        let data = parser.extract_system_data().expect("Should parse http").unwrap();
+
+        let data = parse_system(input).expect("Should parse http");
 
         if let Some(ConfigProvider::Http(cfg)) = data.provider {
             assert_eq!(cfg.address.port(), 9090);
@@ -347,11 +265,8 @@ mod tests {
             }
         }
         "#;
-        let doc: KdlDocument = input.parse().unwrap();
-        let parser = SystemDataSection::new(&doc, "test");
-        let data = parser
-            .extract_system_data()
-            .expect("Should parse http defaults").unwrap();
+
+        let data = parse_system(input).expect("Should parse http defaults");
 
         if let Some(ConfigProvider::Http(cfg)) = data.provider {
             assert!(!cfg.persist);
@@ -359,23 +274,6 @@ mod tests {
         } else {
             panic!("Wrong provider type");
         }
-    }
-
-    #[test]
-    fn test_http_bad_path() {
-        let input = r#"
-        system {
-            providers {
-                http address="0.0.0.0:80" path="no-slash"
-            }
-        }
-        "#;
-        let doc: KdlDocument = input.parse().unwrap();
-        let parser = SystemDataSection::new(&doc, "test");
-        let result = parser.extract_system_data();
-
-        let err_msg = result.unwrap_err().help().unwrap().to_string();
-        crate::assert_err_contains!(err_msg, "Path must start with '/'");
     }
 
     #[test]
@@ -388,11 +286,15 @@ mod tests {
             }
         }
         "#;
-        let doc: KdlDocument = input.parse().unwrap();
-        let parser = SystemDataSection::new(&doc, "test");
-        let result = parser.extract_system_data();
 
+        let result = parse_system(input);
+
+        assert!(result.is_err());
         let err_msg = result.unwrap_err().help().unwrap().to_string();
-        crate::assert_err_contains!(err_msg, "Only one configuration provider is allowed");
+
+        assert_err_contains!(
+            err_msg,
+            "Directive 'http' conflicts with 's3' (mutually exclusive)"
+        );
     }
 }

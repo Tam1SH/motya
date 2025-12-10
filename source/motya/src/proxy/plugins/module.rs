@@ -14,16 +14,12 @@ use wasmtime_wasi_io::IoView;
 use crate::proxy::{
     filters::types::{RequestFilterMod, RequestModifyMod, ResponseModifyMod},
     plugins::{
-        g::{
-            self,
-            exports::motya::proxy::filter_factory::GuestFilterInstance,
-        },
+        g::{self, exports::motya::proxy::filter_factory::GuestFilterInstance},
         host::HostFunctions,
         store::{ModuleState, SessionCtx, WasmArtifact},
     },
     MotyaContext,
 };
-
 
 pub trait TraitModuleState: WasiView + IoView + HostFunctions + Default + 'static {}
 

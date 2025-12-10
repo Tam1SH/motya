@@ -1,10 +1,20 @@
-use std::collections::HashMap;
+use std::path::PathBuf;
 
 use kdl::KdlDocument;
+use motya_macro::validate;
 
 use crate::{
-    common_types::{file_server::FileServerConfig, section_parser::SectionParser},
-    kdl::{listeners::ListenersSection, utils},
+    common_types::{
+        file_server::FileServerPartialConfig,
+        section_parser::SectionParser,
+    },
+    kdl::
+        parser::{
+            ctx::ParseContext,
+            ensures::Rule,
+            utils::{OptionTypedValueExt, PrimitiveType},
+        }
+    ,
 };
 
 pub struct FileServerSection<'a> {
@@ -12,44 +22,26 @@ pub struct FileServerSection<'a> {
     name: &'a str,
 }
 
-impl SectionParser<KdlDocument, FileServerConfig> for FileServerSection<'_> {
-    fn parse_node(&self, node: &KdlDocument) -> miette::Result<FileServerConfig> {
-        self.extract_file_server(node)
+impl SectionParser<ParseContext<'_>, FileServerPartialConfig> for FileServerSection<'_> {
+    #[validate(ensure_node_name = "file-server")]
+    fn parse_node(&self, ctx: ParseContext) -> miette::Result<FileServerPartialConfig> {
+        ctx.validate(&[
+            Rule::NoChildren,
+            Rule::NoPositionalArgs,
+            Rule::OnlyKeysTyped(&[("base-path", PrimitiveType::String)]),
+        ])?;
+
+        let base_path = ctx.opt_prop("base-path")?.as_str()?.map(PathBuf::from);
+
+        Ok(FileServerPartialConfig {
+            name: self.name.to_string(),
+            base_path,
+        })
     }
 }
 
 impl<'a> FileServerSection<'a> {
     pub fn new(doc: &'a KdlDocument, name: &'a str) -> Self {
         Self { doc, name }
-    }
-
-    /// Extracts a single file server from the `services` block
-    fn extract_file_server(&self, node: &KdlDocument) -> miette::Result<FileServerConfig> {
-        // Listeners
-        //
-        let listeners = ListenersSection::new(self.doc, self.name).parse_node(node)?;
-        // Base Path
-        //
-        let fs_node = utils::required_child_doc(self.doc, node, "file-server", self.name)?;
-        let data_nodes = utils::data_nodes(self.doc, fs_node)?;
-        let mut map = HashMap::new();
-        for (node, name, args) in data_nodes {
-            map.insert(name, (node, args));
-        }
-
-        let base_path = if let Some((bpnode, bpargs)) = map.get("base-path") {
-            let val = utils::extract_one_str_arg(self.doc, bpnode, "base-path", bpargs, self.name, |a| {
-                Some(a.to_string())
-            })?;
-            Some(val.into())
-        } else {
-            None
-        };
-
-        Ok(FileServerConfig {
-            name: self.name.to_string(),
-            listeners,
-            base_path,
-        })
     }
 }

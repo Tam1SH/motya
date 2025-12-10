@@ -1,16 +1,16 @@
 use std::collections::HashSet;
 
-use kdl::KdlDocument;
-use miette::{miette, Result};
 use crate::common_types::bad::Bad;
 use crate::common_types::definitions_table::DefinitionsTable;
 use crate::common_types::section_parser::SectionParser;
 use crate::internal::Config;
+use crate::kdl::parser::block::BlockParser;
+use crate::kdl::parser::ctx::{Current, ParseContext};
 use crate::kdl::{
-    definitions::DefinitionsSection, 
-    services::ServicesSection, 
-    system_data::SystemDataSection
+    definitions::DefinitionsSection, services::ServicesSection, system_data::SystemDataSection,
 };
+use kdl::KdlDocument;
+use miette::{miette, Result};
 
 /// Orchestrates the loading and composition of the configuration from multiple KDL files.
 ///
@@ -47,23 +47,34 @@ impl ConfigCompiler {
             return Err(miette!("No configuration documents provided"));
         }
 
-        if !self.documents.iter().any(|(doc, _)| {
-            doc.get("definitions").is_some() || doc.get("services").is_some()
-        }) {
-            return Err(miette!("Configuration must contain at least one 'definitions' or 'services' section."));
+        if !self
+            .documents
+            .iter()
+            .any(|(doc, _)| doc.get("definitions").is_some() || doc.get("services").is_some())
+        {
+            return Err(miette!(
+                "Configuration must contain at least one 'definitions' or 'services' section."
+            ));
         }
 
-        let allowed_names: HashSet<&str> = ["services", "definitions", "includes", "system"].iter().cloned().collect();
+        let allowed_names: HashSet<&str> = ["services", "definitions", "includes", "system"]
+            .iter()
+            .cloned()
+            .collect();
 
         for (doc, source_name) in &self.documents {
-            
-            let present_names: HashSet<&str> = doc.nodes().iter().map(|n| n.name().value()).collect();
+            let present_names: HashSet<&str> =
+                doc.nodes().iter().map(|n| n.name().value()).collect();
 
-            let unknown_names: Vec<&str> = present_names.difference(&allowed_names).cloned().collect();
+            let unknown_names: Vec<&str> =
+                present_names.difference(&allowed_names).cloned().collect();
 
             if !unknown_names.is_empty() {
-
-                if let Some(node) = doc.nodes().iter().find(|n| unknown_names.contains(&n.name().value())) {
+                if let Some(node) = doc
+                    .nodes()
+                    .iter()
+                    .find(|n| unknown_names.contains(&n.name().value()))
+                {
                     let unknown = node.name().value();
                     return Err(Bad::docspan(
                         format!("Unknown top-level section '{}' in '{}'. Allowed: services, definitions, includes, system.", unknown, source_name),
@@ -75,12 +86,22 @@ impl ConfigCompiler {
             }
         }
 
-
         let mut final_config = Config::default();
 
-        let sys_data = self.documents.iter()
+        let sys_data = self
+            .documents
+            .iter()
             .try_fold(None, |acc, (doc, name)| {
-                let parsed = SystemDataSection::new(doc, name).parse_node(doc)?;
+                let mut block = BlockParser::new(ParseContext::new(
+                    doc,
+                    Current::Document(doc),
+                    name,
+                ))?;
+
+                let parsed = block.optional("system", |ctx| {
+                    SystemDataSection.parse_node(ctx)
+                })?.flatten();
+                
                 match (acc, parsed) {
                     (prev, None) => Ok(prev),
                     (None, Some(curr)) => Ok(Some(curr)),
@@ -89,35 +110,39 @@ impl ConfigCompiler {
             })?
             .ok_or_else(|| miette!("Missing 'system' section in configuration"))?;
 
-
         final_config.threads_per_service = sys_data.threads_per_service;
         final_config.daemonize = sys_data.daemonize;
         final_config.upgrade_socket = sys_data.upgrade_socket;
         final_config.pid_file = sys_data.pid_file;
 
-        
         for (doc, name) in &self.documents {
-            
-            if let Ok(defs) = DefinitionsSection::new(doc, name).parse_node(doc) {
+            let ctx = ParseContext::new(doc, Current::Document(doc), name);
+            let mut block = BlockParser::new(ctx)?;
+
+            let defs = block.optional("definitions", |ctx| DefinitionsSection.parse_node(ctx))?;
+
+            if let Some(defs) = defs {
                 global_definitions.merge(defs)?;
             }
         }
 
         for (doc, name) in &self.documents {
-            if doc.get("services").is_none() {
-                continue;
-            }
-            
-            let services_config = ServicesSection::new(global_definitions, name).parse_node(doc)?;
+            let ctx = ParseContext::new(doc, Current::Document(doc), name);
+            let mut block = BlockParser::new(ctx)?;
 
-            final_config.basic_proxies.extend(services_config.proxies);
-            final_config.file_servers.extend(services_config.file_servers);
+            if let Some(services_config) = block.optional("services", |ctx| {
+                ServicesSection::new(global_definitions).parse_node(ctx)
+            })? {
+                final_config.basic_proxies.extend(services_config.proxies);
+                final_config
+                    .file_servers
+                    .extend(services_config.file_servers);
+            }
         }
 
         Ok(final_config)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -126,7 +151,6 @@ mod tests {
     use fqdn::fqdn;
     #[tokio::test]
     async fn test_namespace_merge_across_files() {
-
         const DEF_ONE: &str = r#"
         definitions {
             modifiers {
@@ -160,7 +184,7 @@ mod tests {
             TestService {
                 listeners { "127.0.0.1:8080" }
                 connectors {
-                    return code="200" response="OK"
+                    return code=200 response="OK"
                 }
             }
         }
@@ -169,8 +193,12 @@ mod tests {
         let def1: KdlDocument = DEF_ONE.parse().unwrap();
         let def2: KdlDocument = DEF_TWO.parse().unwrap();
         let main: KdlDocument = MAIN_CONFIG.parse().unwrap();
-        
-        let files = vec![(def1, "def1.kdl".to_string()), (def2, "def2.kdl".to_string()), (main, "main.kdl".to_string())];
+
+        let files = vec![
+            (def1, "def1.kdl".to_string()),
+            (def2, "def2.kdl".to_string()),
+            (main, "main.kdl".to_string()),
+        ];
 
         let compiler = ConfigCompiler::new(files);
 
@@ -196,8 +224,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_plugin_definition_across_files() {
-        
-
         const SHARED_PLUGIN: &str = r#"
         definitions {
             plugins {
@@ -224,27 +250,27 @@ mod tests {
                 listeners { "127.0.0.1:8080" }
                 connectors {
                     use-chain "test-chain"
-                    return code="200" response="OK"
+                    return code=200 response="OK"
                 }
             }
         }
         "#;
 
-
         let shared1: KdlDocument = SHARED_PLUGIN.parse().unwrap();
         let shared2: KdlDocument = SHARED_PLUGIN.parse().unwrap();
         let main: KdlDocument = MAIN_CONFIG.parse().unwrap();
-        
-        let files = vec![(shared1, "shared1.kdl".to_string()), (shared2, "shared2.kdl".to_string()), (main, "main.kdl".to_string())];
+
+        let files = vec![
+            (shared1, "def1.kdl".to_string()),
+            (shared2, "def2.kdl".to_string()),
+            (main, "main.kdl".to_string()),
+        ];
 
         let compiler = ConfigCompiler::new(files);
 
         let mut def_table = DefinitionsTable::new_with_global();
 
-        let result = compiler
-            .compile(&mut def_table);
-
-        assert!(result.is_err());
+        let result = compiler.compile(&mut def_table);
 
         let err_msg = result.unwrap_err().to_string();
 
@@ -256,7 +282,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_chain_definition_across_files() {
-        
         const SHARED_DEF: &str = r#"
             definitions {
                 modifiers {
@@ -280,25 +305,27 @@ mod tests {
                     listeners { "127.0.0.1:8080" }
                     connectors {
                         use-chain "test-chain"
-                        return code="200" response="OK"
+                        return code=200 response="OK"
                     }
                 }
             }
         "#;
 
-
         let def1: KdlDocument = SHARED_DEF.parse().unwrap();
         let def2: KdlDocument = SHARED_DEF.parse().unwrap();
         let main: KdlDocument = MAIN_CONFIG.parse().unwrap();
-        
-        let files = vec![(def1, "def1.kdl".to_string()), (def2, "def2.kdl".to_string()), (main, "main.kdl".to_string())];
+
+        let files = vec![
+            (def1, "def1.kdl".to_string()),
+            (def2, "def2.kdl".to_string()),
+            (main, "main.kdl".to_string()),
+        ];
 
         let compiler = ConfigCompiler::new(files);
 
         let mut def_table = DefinitionsTable::new_with_global();
 
-        let result = compiler
-            .compile(&mut def_table);
+        let result = compiler.compile(&mut def_table);
 
         let err_msg = result.unwrap_err().to_string();
         crate::assert_err_contains!(
@@ -309,7 +336,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_include_logic() {
-
         const DEFINITIONS_FILE: &str = r#"
             definitions {
                 modifiers {
@@ -332,16 +358,15 @@ mod tests {
                     listeners { "127.0.0.1:8080" }
                     connectors {
                         use-chain "test-chain"
-                        return code="200" response="OK"
+                        return code=200 response="OK"
                     }
                 }
             }
         "#;
 
-        
         let def: KdlDocument = DEFINITIONS_FILE.parse().unwrap();
         let main: KdlDocument = MAIN_FILE.parse().unwrap();
-        
+
         let files = vec![(def, "def.kdl".to_string()), (main, "main.kdl".to_string())];
 
         let compiler = ConfigCompiler::new(files);
@@ -356,4 +381,3 @@ mod tests {
         assert_eq!(config.basic_proxies.len(), 1);
     }
 }
-

@@ -1,5 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
+use http::uri::PathAndQuery;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigProvider {
     Files(FilesProviderConfig),
@@ -24,7 +26,7 @@ pub struct S3ProviderConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpProviderConfig {
     pub address: SocketAddr,
-    pub path: String,
+    pub path: PathAndQuery,
     pub persist: bool,
 }
 

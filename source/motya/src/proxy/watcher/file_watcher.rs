@@ -1,20 +1,27 @@
-use std::{collections::HashMap, convert::Infallible, marker::PhantomData, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap, convert::Infallible, marker::PhantomData, path::PathBuf, time::Duration,
+};
 
 use futures_util::future::try_join_all;
 use miette::IntoDiagnostic;
 use notify::{Event, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
-use crate::{fs_adapter::TokioFs, proxy::{
-    SharedProxyState, upstream_factory::UpstreamFactory, upstream_router::UpstreamRouter
-}};
+use crate::{
+    fs_adapter::TokioFs,
+    proxy::{upstream_factory::UpstreamFactory, upstream_router::UpstreamRouter, SharedProxyState},
+};
 use motya_config::{
-    common_types::definitions_table::DefinitionsTable, config_source::ConfigSource, internal::{Config, ProxyConfig}, kdl::fs_loader::FileCollector, loader::{ConfigLoader, FileConfigLoaderProvider}
+    common_types::definitions_table::DefinitionsTable,
+    config_source::ConfigSource,
+    internal::{Config, ProxyConfig},
+    kdl::fs_loader::FileCollector,
+    loader::{ConfigLoader, FileConfigLoaderProvider},
 };
 
 pub struct ConfigWatcher<
     Cs: ConfigSource = FileCollector<TokioFs>,
-    TConfigLoader: FileConfigLoaderProvider + Clone = ConfigLoader<Cs>
+    TConfigLoader: FileConfigLoaderProvider + Clone = ConfigLoader<Cs>,
 > {
     config: Config,
     table: DefinitionsTable,
@@ -22,7 +29,7 @@ pub struct ConfigWatcher<
     watch_entry_path: PathBuf,
     upstream_factory: UpstreamFactory,
     config_loader: TConfigLoader,
-    phantom: PhantomData<Cs>
+    phantom: PhantomData<Cs>,
 }
 
 impl<Cs: ConfigSource, T: FileConfigLoaderProvider + Clone> ConfigWatcher<Cs, T> {
@@ -40,7 +47,7 @@ impl<Cs: ConfigSource, T: FileConfigLoaderProvider + Clone> ConfigWatcher<Cs, T>
             upstream_factory,
             config_loader,
             active_proxies: HashMap::default(),
-            phantom: PhantomData
+            phantom: PhantomData,
         }
     }
 
@@ -213,14 +220,15 @@ mod tests {
             .await
             .unwrap();
         let factory = UpstreamFactory::new(resolver);
-                                    //dummy type
-        let mut watcher: ConfigWatcher<FileCollector<TokioFs>, MockConfigLoader> = ConfigWatcher::new(
-            new_proxy_config.clone(),
-            table.clone(),
-            temp_dir(),
-            factory.clone(),
-            mock_loader.clone(),
-        );
+        //dummy type
+        let mut watcher: ConfigWatcher<FileCollector<TokioFs>, MockConfigLoader> =
+            ConfigWatcher::new(
+                new_proxy_config.clone(),
+                table.clone(),
+                temp_dir(),
+                factory.clone(),
+                mock_loader.clone(),
+            );
 
         let upstream = factory
             .create_context(new_proxy_config.basic_proxies[0].connectors.upstreams[0].clone())

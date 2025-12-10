@@ -18,5 +18,44 @@ definitions {
         }
     }
 
+
+    storages {
+        storage "local-mem" type="memory" {
+            max-keys 10000        
+            cleanup-interval "1m" 
+        }
+
+        storage "redis-cluster" type="redis" {
+            addresses "127.0.0.1:6379" "127.0.0.1:6380"
+            password "secret"
+            timeout "50ms"
+        }
+    }
+
+
+    rate-limits {
+        
+        policy "ip-protection" {
+            algorithm "token-bucket"
+            storage "local-mem"
+            
+            key "${remote-ip}" 
+
+            rate "100/s"
+            burst 10     
+        }
+
+        policy "video-limit" {
+            algorithm "token-bucket"
+            storage "redis-cluster"
+            
+            key "global:heavy-mp4-files"
+
+            rate "500/m"
+            burst 50
+        }
+    }
+
+
 }
 

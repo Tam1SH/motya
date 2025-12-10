@@ -22,15 +22,6 @@ documentation = "https://docs.rs/motya/"
 all-features = true
 rustdoc-args = ["--cfg", "doc_cfg"]
 
-[[bench]]
-name = "upsert_header_request"
-harness = false
-
-[[bench]]
-name = "balancer"
-harness = false
-
-
 [dependencies]
 motya-config = { workspace = true } 
 pandora-module-utils = { workspace = true } 

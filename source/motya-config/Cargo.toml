@@ -4,6 +4,7 @@ version = "0.5.0"
 edition = "2021"
 
 [dependencies]
+motya-macro = { workspace = true }
 async-recursion = { workspace = true }
 fqdn = { workspace = true }
 arc-swap = { workspace = true }

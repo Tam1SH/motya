@@ -34,6 +34,7 @@ mod tests {
         match client.get(&url).send().await {
             Ok(resp) => {
                 // We accept 200 and 500 (used in Stage 2) as valid responses for verification
+                
                 if resp.status().is_success() || resp.status().as_u16() == 500 {
                     resp.text().await.ok()
                 } else {
@@ -49,7 +50,7 @@ mod tests {
             loop {
                 let current_body = get_response_body(port, path).await;
                 let expected_owned = expected_body.map(|s| s.to_string());
-
+                
                 if current_body == expected_owned {
                     return;
                 }
@@ -81,9 +82,9 @@ mod tests {
                 TestService {
                     listeners { "127.0.0.1:__PORT__" }
                     connectors {
-                        section "/1" { return code="200" response="OK1" }
-                        section "/2" { return code="200" response="OK2" }
-                        section "/3" { return code="200" response="OK3" }
+                        section "/1" { return code=200 response="OK1" }
+                        section "/2" { return code=200 response="OK2" }
+                        section "/3" { return code=200 response="OK3" }
                     }
                 }
             }
@@ -95,9 +96,9 @@ mod tests {
                 TestService {
                     listeners { "127.0.0.1:__PORT__" }
                     connectors {
-                        section "/2" { return code="500" response="BAD" }
-                        section "/4" { return code="200" response="OK4" }
-                        section "/5" { return code="200" response="OK5" }
+                        section "/2" { return code=500 response="BAD" }
+                        section "/4" { return code=200 response="OK4" }
+                        section "/5" { return code=200 response="OK5" }
                     }
                 }
             }
@@ -109,11 +110,11 @@ mod tests {
                 TestService {
                     listeners { "127.0.0.1:__PORT__" }
                     connectors {
-                        section "/1" { return code="200" response="OK1" }
-                        section "/2" { return code="200" response="OK NOW" }
-                        section "/3" { return code="200" response="OK3" }
-                        section "/4" { return code="200" response="OK4" }
-                        section "/5" { return code="200" response="OK5" }
+                        section "/1" { return code=200 response="OK1" }
+                        section "/2" { return code=200 response="OK NOW" }
+                        section "/3" { return code=200 response="OK3" }
+                        section "/4" { return code=200 response="OK4" }
+                        section "/5" { return code=200 response="OK5" }
                     }
                 }
             }
@@ -158,7 +159,10 @@ mod tests {
         });
 
         // Initialize Watcher
-        let mut watcher: ConfigWatcher<FileCollector<TokioFs>, ConfigLoader<FileCollector<TokioFs>>> = ConfigWatcher::new(
+        let mut watcher: ConfigWatcher<
+            FileCollector<TokioFs>,
+            ConfigLoader<FileCollector<TokioFs>>,
+        > = ConfigWatcher::new(
             config.clone(),
             definitions,
             config_path.clone(),

@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "source/motya",
-    "source/motya-config", 
+    "source/motya-config", "source/motya-macro", 
     "source/motya-vscode",
     "source/tests"
 ]
@@ -40,6 +40,7 @@ rev = "050b9a86226bd08c152ffa4fc25bdfada4f66ea1"
 
 [workspace.dependencies]
 motya-config = { path = "source/motya-config" }
+motya-macro = { path = "source/motya-macro" }
 
 async-recursion = "1.1.1"
 fqdn = "0.5.0"

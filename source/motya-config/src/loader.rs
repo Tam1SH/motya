@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use miette::Result;
+use std::path::PathBuf;
 
 use crate::common_types::definitions_table::DefinitionsTable;
 use crate::config_source::ConfigSource;
@@ -17,7 +17,7 @@ pub trait FileConfigLoaderProvider {
 
 #[derive(Clone)]
 pub struct ConfigLoader<S: ConfigSource> {
-    source: S
+    source: S,
 }
 
 impl<S: ConfigSource> FileConfigLoaderProvider for ConfigLoader<S> {
@@ -27,13 +27,9 @@ impl<S: ConfigSource> FileConfigLoaderProvider for ConfigLoader<S> {
         global_definitions: &mut DefinitionsTable,
     ) -> Result<Option<Config>> {
         if let Some(path) = path {
-            
-            let documents = self.source
-                .collect(path)
-                .await?;
+            let documents = self.source.collect(path).await?;
 
-            let config = ConfigCompiler::new(documents)
-                .compile(global_definitions)?;
+            let config = ConfigCompiler::new(documents).compile(global_definitions)?;
 
             Ok(Some(config))
         } else {

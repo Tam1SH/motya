@@ -1,14 +1,14 @@
 use std::{
-    collections::HashMap, net::SocketAddr, str::FromStr, sync::atomic::{AtomicUsize, Ordering}
+    net::SocketAddr,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use http::{uri::PathAndQuery, StatusCode, Uri};
-use kdl::{KdlDocument, KdlEntry, KdlNode};
-use miette::SourceSpan;
+use motya_macro::validate;
 
 use crate::{
+    block_parser,
     common_types::{
-        bad::{Bad, OptExtParse},
         connectors::{
             Connectors, ConnectorsLeaf, HttpPeerConfig, MultiServerUpstreamConfig, RouteMatcher,
             UpstreamConfig, UpstreamContextConfig, UpstreamServer, ALPN,
@@ -22,30 +22,28 @@ use crate::{
     kdl::{
         chain_parser::ChainParser,
         key_profile_parser::KeyProfileParser,
-        utils::{self, HashMapValidationExt},
+        parser::{
+            block::BlockParser,
+            ctx::ParseContext,
+            ensures::Rule,
+            utils::{OptionTypedValueExt, PrimitiveType},
+        },
     },
 };
 
 pub struct ConnectorsSection<'a> {
     table: &'a DefinitionsTable,
-    doc: &'a KdlDocument,
-    name: &'a str,
     anon_counter: AtomicUsize,
 }
 
-impl SectionParser<KdlDocument, Connectors> for ConnectorsSection<'_> {
-    fn parse_node(&self, node: &KdlDocument) -> miette::Result<Connectors> {
+impl SectionParser<ParseContext<'_>, Connectors> for ConnectorsSection<'_> {
+    #[validate(ensure_node_name = "connectors")]
+    fn parse_node(&self, ctx: ParseContext) -> miette::Result<Connectors> {
         let mut anonymous_definitions = DefinitionsTable::default();
 
-        let root_nodes = self.parse_connections_node(node, &mut anonymous_definitions)?;
+        let root_nodes = self.parse_connections_node(ctx, &mut anonymous_definitions)?;
 
         let upstreams = flatten_nodes(root_nodes, &[])?;
-
-        if upstreams.is_empty() {
-            return Err(
-                Bad::docspan("We require at least one connector", self.doc, &node.span(), self.name).into(),
-            );
-        }
 
         Ok(Connectors {
             upstreams,
@@ -55,24 +53,20 @@ impl SectionParser<KdlDocument, Connectors> for ConnectorsSection<'_> {
 }
 
 impl<'a> ConnectorsSection<'a> {
-    pub fn new(doc: &'a KdlDocument, table: &'a DefinitionsTable, name: &'a str) -> Self {
+    pub fn new(table: &'a DefinitionsTable) -> Self {
         Self {
             table,
-            doc,
-            name,
             anon_counter: AtomicUsize::new(0),
         }
     }
 
     pub fn parse_connections_node(
         &self,
-        node: &KdlDocument,
+        ctx: ParseContext<'_>,
         anonymous_definitions: &mut DefinitionsTable,
     ) -> miette::Result<Vec<ConnectorsLeaf>> {
-        let conn_node = utils::required_child_doc(self.doc, node, "connectors", self.name)?;
-
         self.process_nodes_recursive(
-            conn_node,
+            ctx,
             anonymous_definitions,
             "/".parse().unwrap(),
             RouteMatcher::Exact,
@@ -81,120 +75,48 @@ impl<'a> ConnectorsSection<'a> {
 
     fn process_nodes_recursive(
         &self,
-        parent_node: &KdlDocument,
-        anonymous_definitions: &mut DefinitionsTable,
+        ctx: ParseContext<'a>,
+        anon_definitions: &mut DefinitionsTable,
         base_path: PathAndQuery,
-        current_matcher: RouteMatcher,
+        matcher: RouteMatcher,
     ) -> miette::Result<Vec<ConnectorsLeaf>> {
-        let nodes = utils::data_nodes(self.doc, parent_node)?;
+        block_parser!(
+            ctx,
+            leaf: optional_any(&["proxy", "return"]) => |ctx, name| match name {
+                "return" => self.extract_static_response(ctx, base_path.clone()),
+                "proxy" => self.extract_connector(ctx, base_path.clone(), matcher),
+                _ => unreachable!("Guaranteed by BlockParser"),
+            },
+            lb: optional("load-balance") => |ctx| self.extract_load_balance(ctx, anon_definitions),
+            chains: repeated("use-chain") => |ctx| self.extract_chain_usage(ctx, anon_definitions, base_path.clone()),
+            sections: repeated("section") => |ctx| self.extract_section(ctx, anon_definitions, base_path.clone(), matcher)
+        );
+
         let mut result = Vec::new();
 
-        let mut exclusive_handler: Option<(&str, SourceSpan)> = None;
-        let mut has_load_balance = false;
-
-        for (node, name, args) in nodes {
-            let processed_node = match name {
-                "return" | "proxy" => {
-                    if let Some((prev_name, _)) = exclusive_handler {
-                        return Err(Bad::docspan(
-                            format!("Directive '{name}' conflicts with previously defined '{prev_name}' in this section"), 
-                            self.doc,
-                            &node.span(), self.name
-                        ).into());
-                    }
-
-                    exclusive_handler = Some((name, node.span()));
-
-                    match name {
-                        "return" => self.extract_static_response(node, args, base_path.clone())?,
-                        "proxy" => {
-                            self.extract_connector(node, args, base_path.clone(), current_matcher)?
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-
-                "load-balance" => {
-                    if has_load_balance {
-                        return Err(Bad::docspan(
-                            "Duplicate 'load-balance' directive",
-                            self.doc,
-                            &node.span(), self.name
-                        )
-                        .into());
-                    }
-                    has_load_balance = true;
-                    self.extract_load_balance(node, anonymous_definitions)?
-                }
-
-                "section" => self.extract_section(
-                    node,
-                    args,
-                    anonymous_definitions,
-                    base_path.clone(),
-                    current_matcher,
-                )?,
-                "use-chain" => {
-                    self.extract_chain_usage(node, args, anonymous_definitions, base_path.clone())?
-                }
-
-                unknown => {
-                    return Err(Bad::docspan(
-                        format!("Unknown directive: {unknown}"),
-                        self.doc,
-                        &node.span(), self.name
-                    )
-                    .into())
-                }
-            };
-
-            result.push(processed_node);
+        if let Some(l) = leaf {
+            result.push(l);
         }
+        if let Some(l) = lb {
+            result.push(l);
+        }
+
+        result.extend(chains);
+        result.extend(sections);
 
         Ok(result)
     }
 
     fn extract_chain_usage(
         &self,
-        node: &KdlNode,
-        args: &[KdlEntry],
+        ctx: ParseContext<'_>,
         anonymous_definitions: &mut DefinitionsTable,
         path: PathAndQuery,
     ) -> miette::Result<ConnectorsLeaf> {
-        //named use-chain
-        if let Some(arg) = args.first() {
-            let name = arg.value().as_string().ok_or_else(|| {
-                Bad::docspan("Chain reference must be a string", self.doc, &arg.span(), self.name)
-            })?;
+        if ctx.has_children_block()? {
+            ctx.validate(&[Rule::NoArgs])?;
 
-            if node.children().is_some() {
-                return Err(Bad::docspan(
-                    "use-chain cannot have both a name argument and a code block. Choose one.",
-                    self.doc,
-                    &node.span(), self.name
-                )
-                .into());
-            }
-
-            let chain = self.table.get_chain_by_name(name).ok_or_else(|| {
-                Bad::docspan(
-                    format!("Chain '{}' not found in definitions", name),
-                    self.doc,
-                    &arg.span(), self.name,
-                )
-            })?;
-
-            return Ok(ConnectorsLeaf::Modificator(Modificator::Chain(
-                NamedFilterChain {
-                    chain,
-                    name: name.to_string(),
-                },
-            )));
-        }
-
-        //anonymous use-chain
-        if let Some(children) = node.children() {
-            let chain = ChainParser::new(self.name).parse(self.doc, children)?;
+            let chain = ChainParser.parse(ctx.enter_block()?)?;
 
             let id = self.anon_counter.fetch_add(1, Ordering::Relaxed);
             let path_slug = path.path().replace('/', "_");
@@ -202,101 +124,74 @@ impl<'a> ConnectorsSection<'a> {
 
             anonymous_definitions.insert_chain(generated_name.clone(), chain.clone());
 
-            return Ok(ConnectorsLeaf::Modificator(Modificator::Chain(
+            Ok(ConnectorsLeaf::Modificator(Modificator::Chain(
                 NamedFilterChain {
                     chain,
                     name: generated_name,
                 },
-            )));
-        }
+            )))
+        } else {
+            ctx.validate(&[Rule::NoChildren, Rule::ExactArgs(1), Rule::OnlyKeys(&[])])?;
 
-        Err(Bad::docspan(
-            "use-chain requires either a name argument or a block of filters",
-            self.doc,
-            &node.span(), self.name
-        )
-        .into())
+            let name = ctx.first()?.as_str()?;
+
+            let chain = self
+                .table
+                .get_chain_by_name(&name)
+                .ok_or_else(|| ctx.error(format!("Chain '{}' not found in definitions", name)))?;
+
+            Ok(ConnectorsLeaf::Modificator(Modificator::Chain(
+                NamedFilterChain {
+                    chain,
+                    name: name.to_string(),
+                },
+            )))
+        }
     }
 
     fn extract_section(
         &self,
-        node: &KdlNode,
-        args: &[KdlEntry],
+        ctx: ParseContext<'_>,
         anonymous_definitions: &mut DefinitionsTable,
         base_path: PathAndQuery,
         parent_matcher: RouteMatcher,
     ) -> miette::Result<ConnectorsLeaf> {
-        let path_arg = args
-            .iter()
-            .find(|entry| entry.name().is_none())
-            .ok_or_else(|| {
-                Bad::docspan(
-                    "Section node requires a path argument",
-                    self.doc,
-                    &node.span(), self.name
-                )
-            })?;
+        ctx.validate(&[
+            Rule::ReqChildren,
+            Rule::ExactArgs(1),
+            Rule::OnlyKeysTyped(&[("as", PrimitiveType::String)]),
+        ])?;
 
-        let path_segment = path_arg.value().as_string().ok_or_else(|| {
-            Bad::docspan(
-                "Section path argument must be a string",
-                self.doc,
-                &path_arg.span(), self.name,
-            )
-        })?;
+        let path_segment = ctx.arg(0)?.as_str()?;
+        let mode_arg = ctx.opt_prop("as")?.as_str()?;
 
-        let mode_arg = args
-            .iter()
-            .find(|entry| entry.name().map(|n| n.value()) == Some("as"));
-
-        let next_matcher = if let Some(entry) = mode_arg {
-            match entry.value().as_string() {
-                Some("prefix") => RouteMatcher::Prefix,
-                Some("exact") => RouteMatcher::Exact,
-                Some(other) => {
-                    return Err(Bad::docspan(
-                        format!("Unknown routing mode '{other}'. Use 'prefix' or 'exact'"),
-                        self.doc,
-                        &entry.span(), self.name,
-                    )
-                    .into())
-                }
-                None => {
-                    return Err(Bad::docspan(
-                        "Routing mode must be a string",
-                        self.doc,
-                        &entry.span(), self.name,
-                    )
-                    .into())
-                }
+        let next_matcher = match mode_arg.as_deref() {
+            Some("prefix") => RouteMatcher::Prefix,
+            Some("exact") => RouteMatcher::Exact,
+            Some(other) => {
+                return Err(ctx.error(format!(
+                    "Unknown routing mode '{other}'. Use 'prefix' or 'exact'"
+                )))
             }
-        } else {
-            parent_matcher
+            None => parent_matcher,
         };
 
-        let children_doc = node.children().ok_or_else(|| {
-            Bad::docspan("Section node must have children", self.doc, &node.span(), self.name)
-        })?;
+        let children_nodes = ctx.req_nodes()?;
 
         if next_matcher == RouteMatcher::Exact {
-            for child in children_doc.nodes() {
-                if child.name().value() == "section" {
-                    return Err(Bad::docspan(
+            for child in &children_nodes {
+                if child.name()? == "section" {
+                    return Err(child.error(
                         "A section with 'exact' routing mode cannot contain nested sections.",
-                        self.doc,
-                        &child.span(), self.name,
-                    )
-                    .into());
+                    ));
                 }
             }
         }
 
-        let full_path = if base_path.path().is_empty() || base_path.path() == "/" {
-            if path_segment.starts_with('/') {
-                path_segment.to_string()
-            } else {
-                format!("/{}", path_segment)
-            }
+        let full_path = if base_path.path() == "/" && !path_segment.starts_with('/') {
+            format!("/{}", path_segment)
+        } else if base_path.path() == "/" {
+            path_segment.to_string()
         } else {
             format!(
                 "{}/{}",
@@ -305,16 +200,14 @@ impl<'a> ConnectorsSection<'a> {
             )
         };
 
-        let path = full_path.parse().map_err(|err| {
-            Bad::docspan(
-                format!("Bad path: {full_path}, error: {err}"),
-                self.doc,
-                &path_arg.span(), self.name,
-            )
-        })?;
+        let path = full_path
+            .parse()
+            .map_err(|err| ctx.error(format!("Bad path: {full_path}, error: {err}")))?;
+
+        let block_ctx = ctx.enter_block()?;
 
         Ok(ConnectorsLeaf::Section(self.process_nodes_recursive(
-            children_doc,
+            block_ctx,
             anonymous_definitions,
             path,
             next_matcher,
@@ -323,39 +216,28 @@ impl<'a> ConnectorsSection<'a> {
 
     fn extract_static_response(
         &self,
-        node: &KdlNode,
-        args: &[KdlEntry],
+        ctx: ParseContext<'a>,
         base_path: PathAndQuery,
     ) -> miette::Result<ConnectorsLeaf> {
-        let args = utils::str_str_args(self.doc, args, self.name)
-            .map_err(|err| {
-                Bad::docspan(
-                    format!(
-                        "The return directive must have code and response keys, error: '{err}'"
-                    ),
-                    self.doc,
-                    &node.span(), self.name
-                )
-            })?
-            .into_iter()
-            .collect::<HashMap<&str, &str>>()
-            .ensure_only_keys(&["code", "response"], self.doc, node, self.name)?;
+        ctx.validate(&[
+            Rule::OnlyKeysTyped(&[
+                ("code", PrimitiveType::Integer),
+                ("response", PrimitiveType::String),
+            ]),
+            Rule::NoChildren,
+            Rule::NoPositionalArgs,
+        ])?;
 
-        let http_code_raw = args.get("code").unwrap_or(&"200");
-        let response = args.get("response").unwrap_or(&"");
+        let [code_opt, response] = ctx.props(["code", "response"])?;
 
-        let http_code = StatusCode::from_str(http_code_raw).map_err(|err| {
-            Bad::docspan(
-                format!("Not a valid http code, reason: '{err}'"),
-                self.doc,
-                &node.span(), self.name
-            )
-        })?;
+        let response_body = response.as_str()?.unwrap_or_default();
+
+        let http_code = code_opt.parse_as::<StatusCode>()?.ok_or(ctx.error("invalid http code"))?;
 
         Ok(ConnectorsLeaf::Upstream(UpstreamConfig::Static(
             SimpleResponseConfig {
                 http_code,
-                response_body: response.to_string(),
+                response_body,
                 prefix_path: base_path,
             },
         )))
@@ -363,158 +245,48 @@ impl<'a> ConnectorsSection<'a> {
 
     fn extract_connector(
         &self,
-        node: &KdlNode,
-        args: &[KdlEntry],
+        ctx: ParseContext<'_>,
         base_path: PathAndQuery,
         parent_matcher: RouteMatcher,
     ) -> miette::Result<ConnectorsLeaf> {
-        if let Some(children) = node.children() {
-            if !args.is_empty() {
-                return Err(Bad::docspan(
-                    "The block-style 'proxy' cannot have arguments (like address) on the main node.",
-                    self.doc,
-                    &args[0].span(), self.name,
-                ).into());
-            }
+        if ctx.has_children_block()? {
+            ctx.validate(&[Rule::NoArgs])?;
 
-            let children_nodes = utils::data_nodes(self.doc, children)?;
-            let mut servers: Vec<UpstreamServer> = Vec::new();
-            let mut common_options = HashMap::new();
+            let block_ctx = ctx.enter_block()?;
+            let mut block = BlockParser::new(block_ctx)?;
 
-            let parse_block_option = |common_options: &HashMap<&str, String>,
-                child_node: &KdlNode,
-                name: &str,
-                child_args: &[KdlEntry]|
-             -> miette::Result<String> {
-                let value_entry =
-                    child_args
-                        .iter()
-                        .find(|e| e.name().is_none())
-                        .ok_or_else(|| {
-                            Bad::docspan(
-                                format!("'{name}' requires a value argument"),
-                                self.doc,
-                                &child_node.span(), self.name,
-                            )
-                        })?;
+            let servers = block.required_repeated("server", |ctx| {
+                ctx.validate(&[
+                    Rule::NoChildren,
+                    Rule::ExactArgs(1),
+                    Rule::OnlyKeysTyped(&[("weight", PrimitiveType::Integer)]),
+                ])?;
 
-                let value = value_entry.value().as_string().ok_or_else(|| {
-                    Bad::docspan(
-                        format!("'{name}' value must be a string"),
-                        self.doc,
-                        &value_entry.span(), self.name,
-                    )
-                })?;
+                let address = ctx.first()?.parse_as::<SocketAddr>()?;
 
-                if common_options.contains_key(name) {
-                    return Err(Bad::docspan(
-                        format!("Duplicate '{name}' directive in proxy block"),
-                        self.doc,
-                        &child_node.span(), self.name,
-                    )
-                    .into());
-                }
-                Ok(value.to_string())
-            };
+                let weight = ctx.opt_prop("weight")?.as_usize()?.unwrap_or(1);
 
-            for (child_node, name, child_args) in children_nodes {
-                match name {
-                    "server" => {
-                        let addr_entry = child_args
-                            .iter()
-                            .find(|e| e.name().is_none())
-                            .ok_or_else(|| {
-                                Bad::docspan(
-                                    "server node requires an address argument",
-                                    self.doc,
-                                    &child_node.span(), self.name,
-                                )
-                            })?;
+                Ok(UpstreamServer { address, weight })
+            })?;
 
-                        let addr_str = addr_entry.value().as_string().ok_or_else(|| {
-                            Bad::docspan(
-                                "server address must be a string",
-                                self.doc,
-                                &addr_entry.span(), self.name,
-                            )
-                        })?;
+            let tls_sni = block.optional("tls-sni", |ctx| {
+                ctx.validate(&[Rule::NoChildren, Rule::ExactArgs(1), Rule::OnlyKeys(&[])])?;
+                ctx.first()?.as_str()
+            })?;
 
-                        let address =
-                            str::parse::<std::net::SocketAddr>(addr_str).map_err(|err| {
-                                Bad::docspan(
-                                    format!("Invalid server address '{addr_str}': {err}"),
-                                    self.doc,
-                                    &addr_entry.span(), self.name,
-                                )
-                            })?;
+            let proto_str = block.optional("proto", |ctx| {
+                ctx.validate(&[Rule::NoChildren, Rule::ExactArgs(1), Rule::OnlyKeys(&[])])?;
+                ctx.first()?.as_str()
+            })?;
 
-                        let weight_entry = child_args
-                            .iter()
-                            .find(|e| e.name().map(|n| n.value()) == Some("weight"));
+            block.exhaust()?;
 
-                        let weight = match weight_entry {
-                            Some(entry) => entry.value().as_integer().ok_or_else(|| {
-                                Bad::docspan(
-                                    "server weight must be an integer",
-                                    self.doc,
-                                    &entry.span(), self.name,
-                                )
-                            })? as usize,
-                            None => 1,
-                        };
-
-                        servers.push(UpstreamServer { address, weight });
-                    }
-                    "tls-sni" => {
-                        let value =
-                            parse_block_option(&common_options, child_node, name, child_args)?;
-                        common_options.insert("tls-sni", value);
-                    }
-                    "proto" => {
-                        let value =
-                            parse_block_option(&common_options, child_node, name, child_args)?;
-                        common_options.insert("proto", value);
-                    }
-                    unknown => {
-                        return Err(Bad::docspan(
-                            format!("Unknown directive in proxy block: {unknown}"),
-                            self.doc,
-                            &child_node.span(), self.name,
-                        )
-                        .into())
-                    }
-                }
-            }
-
-            if servers.is_empty() {
-                return Err(Bad::docspan(
-                    "Proxy block must contain at least one 'server' directive",
-                    self.doc,
-                    &node.span(), self.name
-                )
-                .into());
-            }
-
-            let proto = self.extract_proto(node, &common_options)?;
-            let tls_sni_val = common_options.get("tls-sni");
-
-            let (_tls, sni, alpn) = match (proto, tls_sni_val) {
-                (None, None) | (Some(ALPN::H1), None) => (false, String::new(), ALPN::H1),
-                (None, Some(sni)) => (true, sni.to_string(), ALPN::H2H1),
-                (Some(_), None) => {
-                    return Err(Bad::docspan(
-                        "'tls-sni' is required for HTTP2 support in proxy block",
-                        self.doc,
-                        &node.span(), self.name
-                    )
-                    .into());
-                }
-                (Some(p), Some(sni)) => (true, sni.to_string(), p),
-            };
+            let (tls, sni, alpn) =
+                self.resolve_proto_settings(&ctx, proto_str.as_deref(), tls_sni.as_deref())?;
 
             let final_sni = if sni.is_empty() { None } else { Some(sni) };
 
-            return Ok(ConnectorsLeaf::Upstream(UpstreamConfig::MultiServer(
+            Ok(ConnectorsLeaf::Upstream(UpstreamConfig::MultiServer(
                 MultiServerUpstreamConfig {
                     servers,
                     tls_sni: final_sni,
@@ -523,201 +295,176 @@ impl<'a> ConnectorsSection<'a> {
                     target_path: PathAndQuery::from_static("/"),
                     matcher: parent_matcher,
                 },
-            )));
+            )))
+        } else {
+            ctx.validate(&[
+                Rule::ExactArgs(1),
+                Rule::OnlyKeysTyped(&[
+                    ("tls-sni", PrimitiveType::String),
+                    ("proto", PrimitiveType::String),
+                ]),
+            ])?;
+
+            let uri = ctx.first()?.parse_as::<Uri>()?;
+
+            let host_addr = uri
+                .authority()
+                .and_then(|host| host.as_str().parse::<SocketAddr>().ok())
+                .ok_or(ctx.error("Not a valid socket address"))?;
+
+            let [sni_opt, proto_opt] = ctx.props(["tls-sni", "proto"])?;
+
+            let (tls, sni, alpn) = self.resolve_proto_settings(
+                &ctx,
+                proto_opt.as_str()?.as_deref(),
+                sni_opt.as_str()?.as_deref(),
+            )?;
+
+            Ok(ConnectorsLeaf::Upstream(UpstreamConfig::Service(
+                HttpPeerConfig {
+                    peer_address: host_addr,
+                    alpn,
+                    sni,
+                    tls,
+                    prefix_path: base_path,
+                    target_path: uri.path().parse().unwrap_or(PathAndQuery::from_static("/")),
+                    matcher: parent_matcher,
+                },
+            )))
         }
-
-        let first_arg = args.first().ok_or_else(|| {
-            Bad::docspan(
-                "Connector node must provide an address or a block",
-                self.doc,
-                &node.span(), self.name
-            )
-        })?;
-
-        let named_args = &args[1..];
-
-        let args = utils::str_str_args(self.doc, named_args, self.name)?
-            .into_iter()
-            .map(|(k, v)| (k, v.to_string()))
-            .collect::<HashMap<&str, String>>()
-            .ensure_only_keys(&["tls-sni", "proto"], self.doc, node, self.name)?;
-
-        let Some(Ok(uri)) = first_arg.value().as_string().map(str::parse::<Uri>) else {
-            return Err(Bad::docspan("Not a valid url", self.doc, &node.span(), self.name).into());
-        };
-
-        let Some(Ok(host_addr)) = uri
-            .host()
-            .and_then(|host| uri.port().map(|port| format!("{host}:{port}")))
-            .map(|str| str::parse::<SocketAddr>(&str))
-        else {
-            return Err(Bad::docspan("Not a valid host address", self.doc, &node.span(), self.name).into());
-        };
-
-        let proto = self.extract_proto(node, &args)?;
-
-        let tls_sni = args.get("tls-sni");
-
-        let (tls, sni, alpn) = match (proto, tls_sni) {
-            (None, None) | (Some(ALPN::H1), None) => (false, String::new(), ALPN::H1),
-            (None, Some(sni)) => (true, sni.to_string(), ALPN::H2H1),
-            (Some(_), None) => {
-                return Err(Bad::docspan(
-                    "'tls-sni' is required for HTTP2 support",
-                    self.doc,
-                    &node.span(), self.name
-                )
-                .into());
-            }
-            (Some(p), Some(sni)) => (true, sni.to_string(), p),
-        };
-
-        Ok(ConnectorsLeaf::Upstream(UpstreamConfig::Service(
-            HttpPeerConfig {
-                peer_address: host_addr,
-                alpn,
-                prefix_path: base_path,
-                target_path: uri
-                    .path()
-                    .parse::<PathAndQuery>()
-                    .unwrap_or(PathAndQuery::from_static("/")),
-                matcher: parent_matcher,
-            },
-        )))
-    }
-
-    fn extract_proto(
-        &self,
-        node: &KdlNode,
-        args: &HashMap<&str, String>,
-    ) -> Result<Option<ALPN>, miette::Error> {
-        let proto = match args.get("proto") {
-            None => None,
-            Some(value) => parse_proto_value(value).map_err(|msg| {
-                Bad::docspan(format!("{msg}, found '{value}'"), self.doc, &node.span(), self.name)
-            })?,
-        };
-        Ok(proto)
     }
 
     fn extract_load_balance(
         &self,
-        node: &KdlNode,
+        ctx: ParseContext<'_>,
         anonymous_definitions: &mut DefinitionsTable,
     ) -> miette::Result<ConnectorsLeaf> {
-        let items = utils::data_nodes(
-            self.doc,
-            node.children().or_bail(
-                "'load-balance' should have children",
-                self.doc,
-                &node.span(), self.name
-            )?,
-        )?;
+        ctx.validate(&[Rule::ReqChildren, Rule::NoArgs])?;
 
-        let mut selection: Option<SelectionKind> = None;
-        let mut health: Option<HealthCheckKind> = None;
-        let mut discover: Option<DiscoveryKind> = None;
-        let mut template: Option<KeyTemplateConfig> = None;
+        let block_ctx = ctx.enter_block()?;
 
-        for (node, name, args) in items {
-            match name {
-                "selection" => {
-                    let (sel, key_src) = self.parse_selection(node, args, anonymous_definitions)?;
-                    selection = Some(sel);
-                    template = key_src;
+        block_parser!(block_ctx,
+            selection_data: optional("selection") => |ctx| self.parse_selection(ctx, anonymous_definitions),
+
+            health_opt: optional("health-check") => |ctx| {
+                ctx.validate(&[Rule::NoChildren, Rule::ExactArgs(1), Rule::OnlyKeys(&[])])?;
+
+                match ctx.arg(0)?.as_str()?.as_str() {
+                    "None" => Ok(HealthCheckKind::None),
+                    val => Err(ctx.error(format!("Unknown health-check kind: '{val}'"))),
                 }
-                "health-check" => {
-                    health = Some(utils::extract_one_str_arg(
-                        self.doc,
-                        node,
-                        name,
-                        args,
-                        self.name,
-                        |val| match val {
-                            "None" => Some(HealthCheckKind::None),
-                            _ => None,
-                        },
-                    )?);
-                }
-                "discovery" => {
-                    discover = Some(utils::extract_one_str_arg(
-                        self.doc,
-                        node,
-                        name,
-                        args,
-                        self.name,
-                        |val| match val {
-                            "Static" => Some(DiscoveryKind::Static),
-                            _ => None,
-                        },
-                    )?);
-                }
-                other => {
-                    return Err(Bad::docspan(
-                        format!("Unknown setting: '{other}'"),
-                        self.doc,
-                        &node.span(), self.name
-                    )
-                    .into());
+            },
+
+            discovery_opt: optional("discovery") => |ctx| {
+                ctx.validate(&[Rule::NoChildren, Rule::ExactArgs(1), Rule::OnlyKeys(&[])])?;
+
+                match ctx.arg(0)?.as_str()?.as_str() {
+                    "Static" => Ok(DiscoveryKind::Static),
+                    val => Err(ctx.error(format!("Unknown discovery kind: '{val}'"))),
                 }
             }
-        }
+        );
+
+        let (selection, template) = selection_data.unwrap_or((SelectionKind::RoundRobin, None));
+        let health_checks = health_opt.unwrap_or(HealthCheckKind::None);
+        let discovery = discovery_opt.unwrap_or(DiscoveryKind::Static);
+
         Ok(ConnectorsLeaf::LoadBalance(UpstreamOptions {
-            selection: selection.unwrap_or(SelectionKind::RoundRobin),
+            selection,
             template,
-            health_checks: health.unwrap_or(HealthCheckKind::None),
-            discovery: discover.unwrap_or(DiscoveryKind::Static),
+            health_checks,
+            discovery,
         }))
     }
 
     fn parse_selection(
         &self,
-        node: &KdlNode,
-        args: &[KdlEntry],
+        ctx: ParseContext<'_>,
         anonymous_definitions: &mut DefinitionsTable,
     ) -> miette::Result<(SelectionKind, Option<KeyTemplateConfig>)> {
-        let (selection_kind, kv_args) =
-            utils::extract_one_str_arg_with_kv_args(self.doc, node, "selection", args, self.name, |val| {
-                match val {
-                    "RoundRobin" => Some(SelectionKind::RoundRobin),
-                    "Random" => Some(SelectionKind::Random),
-                    "FNV" => Some(SelectionKind::FvnHash),
-                    "Ketama" => Some(SelectionKind::KetamaHashing),
-                    _ => None,
-                }
-            })?;
+        ctx.validate(&[
+            Rule::ExactArgs(1),
+            Rule::OnlyKeysTyped(&[("use-key-profile", PrimitiveType::String)]),
+        ])?;
 
-        let key_source = if let Some(template_name) = kv_args.get("use-key-profile") {
-            if let Some(template) = self.table.get_key_templates().get(template_name) {
-                Some(template.clone())
-            } else {
-                return Err(Bad::docspan(
-                    format!("Key profile '{}' not found", template_name),
-                    self.doc,
-                    &node.span(), self.name
-                )
-                .into());
-            }
-        } else if let Some(nodes) = node.children() {
-            let template = KeyProfileParser::new(self.name).parse(self.doc, nodes)?;
-            let id = self.anon_counter.fetch_add(1, Ordering::Relaxed);
-            let generated_name = format!("__anon_key_{id}");
+        let selection_kind = ctx.first()?.parse_as::<SelectionKind>()?;
 
-            anonymous_definitions.insert_key_profile(generated_name.clone(), template.clone());
+        let profile_ref = ctx.opt_prop("use-key-profile")?.as_str()?;
 
-            Some(template)
-        } else {
-            match selection_kind {
-                SelectionKind::KetamaHashing | SelectionKind::FvnHash => {
-                    return Err(Bad::docspan(
-                        format!("selection '{:?}' requires a key source. Use 'use-key-profile' or inline key configuration.", selection_kind),
-                        self.doc,
-                        &node.span(), self.name
-                    ).into());
-                }
-                _ => None,
-            }
+        let has_block = ctx.has_children_block()?;
+
+        self.validate_selection(
+            ctx,
+            anonymous_definitions,
+            selection_kind,
+            profile_ref,
+            has_block,
+        )
+    }
+
+    fn resolve_proto_settings(
+        &self,
+        ctx: &ParseContext<'_>,
+        proto: Option<&str>,
+        tls_sni: Option<&str>,
+    ) -> miette::Result<(bool, String, ALPN)> {
+        let alpn = match proto {
+            Some(p) => parse_proto_value(p).map_err(|msg| ctx.error(msg))?,
+            None => None,
         };
+
+        match (alpn, tls_sni) {
+            (None, None) | (Some(ALPN::H1), None) => Ok((false, String::new(), ALPN::H1)),
+            (None, Some(sni)) => Ok((true, sni.to_string(), ALPN::H2H1)),
+            (Some(_), None) => Err(ctx.error("'tls-sni' is required for HTTP2 support")),
+            (Some(p), Some(sni)) => Ok((true, sni.to_string(), p)),
+        }
+    }
+
+    fn validate_selection(
+        &self,
+        ctx: ParseContext<'_>,
+        anonymous_definitions: &mut DefinitionsTable,
+        selection_kind: SelectionKind,
+        profile_ref: Option<String>,
+        has_block: bool,
+    ) -> Result<(SelectionKind, Option<KeyTemplateConfig>), miette::Error> {
+        let key_source = match (profile_ref, has_block) {
+            (Some(_), true) => {
+                return Err(ctx.error(
+                    "Cannot use 'use-key-profile' and define an inline block simultaneously",
+                ));
+            }
+            (Some(name), false) => {
+                if let Some(template) = self.table.get_key_templates().get(&name) {
+                    Some(template.clone())
+                } else {
+                    return Err(ctx.error(format!("Key profile '{}' not found", name)));
+                }
+            }
+            (None, true) => {
+                let template = KeyProfileParser.parse(ctx.enter_block()?)?;
+
+                let id = self.anon_counter.fetch_add(1, Ordering::Relaxed);
+                let generated_name = format!("__anon_key_{id}");
+
+                anonymous_definitions.insert_key_profile(generated_name, template.clone());
+                Some(template)
+            }
+            (None, false) => None,
+        };
+
+        match selection_kind {
+            SelectionKind::KetamaHashing | SelectionKind::FvnHash => {
+                if key_source.is_none() {
+                    return Err(ctx.error(format!(
+                        "Selection kind '{kind}' requires a key source. Use 'use-key-profile' or provide an inline key configuration block.",
+                        kind = ctx.first()?.as_str()?
+                    )));
+                }
+            }
+            _ => {}
+        }
 
         Ok((selection_kind, key_source))
     }
@@ -790,32 +537,58 @@ fn parse_proto_value(value: &str) -> Result<Option<ALPN>, String> {
 
 #[cfg(test)]
 mod tests {
-
-    use crate::kdl::definitions::DefinitionsSection;
-
     use super::*;
+    use kdl::KdlDocument;
+    use crate::kdl::parser::block::BlockParser;
+    use crate::kdl::definitions::DefinitionsSection;
+    use crate::assert_err_contains;
+    use crate::kdl::parser::ctx::Current;
 
+    /// Helper to parse config when no external definitions are needed
     fn parse_config(input: &str) -> miette::Result<Connectors> {
         let doc: KdlDocument = input.parse().unwrap();
+        let table = DefinitionsTable::default();
+        
+        let ctx = ParseContext::new(&doc, Current::Document(&doc), "test");
+        let mut block = BlockParser::new(ctx)?;
 
-        let def_parser = DefinitionsSection::new(&doc, "test");
-        let table = def_parser.parse_node(&doc)?;
+        block.required("connectors", |ctx| {
+            ConnectorsSection::new(&table).parse_node(ctx)
+        })
+    }
 
-        let conn_parser = ConnectorsSection::new(&doc, &table, "test");
-        conn_parser.parse_node(&doc)
+    /// Helper to parse config with definitions
+    fn parse_config_with_defs(defs_input: &str, conn_input: &str) -> miette::Result<Connectors> {
+        // 1. Parse definitions
+        let defs_doc: KdlDocument = defs_input.parse().unwrap();
+        let defs_ctx = ParseContext::new(&defs_doc, Current::Document(&defs_doc), "test");
+        let mut defs_block = BlockParser::new(defs_ctx)?;
+        
+        let table = defs_block.required("definitions", |ctx| {
+            DefinitionsSection.parse_node(ctx)
+        })?;
+
+        // 2. Parse connectors
+        let conn_doc: KdlDocument = conn_input.parse().unwrap();
+        let conn_ctx = ParseContext::new(&conn_doc, Current::Document(&conn_doc), "test");
+        let mut conn_block = BlockParser::new(conn_ctx)?;
+        
+        conn_block.required("connectors", |ctx| {
+            ConnectorsSection::new(&table).parse_node(ctx)
+        })
     }
 
     const LOAD_BALANCE_BASIC: &str = r#"
-        connectors {
-            load-balance {
-                selection "RoundRobin"
-                health-check "None"
-                discovery "Static"
-            }
-            proxy {
-                server "127.0.0.1:8080"
-            }
+    connectors {
+        load-balance {
+            selection "RoundRobin"
+            health-check "None"
+            discovery "Static"
         }
+        proxy {
+            server "127.0.0.1:8080"
+        }
+    }
     "#;
 
     #[test]
@@ -832,14 +605,14 @@ mod tests {
     }
 
     const LOAD_BALANCE_ALL_SELECTION_TYPES: &str = r#"
-        connectors {
-            load-balance {
-                selection "Random"
-            }
-            proxy {
-                server "127.0.0.1:8080"
-            }
+    connectors {
+        load-balance {
+            selection "Random"
         }
+        proxy {
+            server "127.0.0.1:8080"
+        }
+    }
     "#;
 
     #[test]
@@ -852,45 +625,48 @@ mod tests {
     }
 
     const LOAD_BALANCE_FNV_HASH: &str = r#"
-        connectors {
-            load-balance {
-                selection "FNV" use-key-profile="ip-profile"
-            }
-            proxy { 
-                server "127.0.0.1:8080"
-            }
+    connectors {
+        load-balance {
+            selection "FNV" use-key-profile="ip-profile"
         }
+        proxy { 
+            server "127.0.0.1:8080"
+        }
+    }
     "#;
 
     #[test]
     fn test_load_balance_fnv_hash_with_key_profile() {
+        // Should fail because "ip-profile" is not defined in the empty table
         let result = parse_config(LOAD_BALANCE_FNV_HASH);
-
         assert!(result.is_err());
     }
 
+    const DEFS_KEY_PROFILE: &str = r#"
+    definitions {
+        key-profiles {
+            template "ip-profile" {
+                key "amogus"
+            }
+        }
+    }
+    "#;
+
     const LOAD_BALANCE_WITH_KEY_PROFILE: &str = r#"
-        definitions {
-            key-profiles {
-                template "ip-profile" {
-                    key "amogus"
-                }
-            }
+    connectors {
+        load-balance {
+            selection "FNV" use-key-profile="ip-profile"
         }
-        
-        connectors {
-            load-balance {
-                selection "FNV" use-key-profile="ip-profile"
-            }
-            proxy {
-                server "127.0.0.1:8080"
-            }
+        proxy {
+            server "127.0.0.1:8080"
         }
+    }
     "#;
 
     #[test]
     fn test_load_balance_with_defined_key_profile() {
-        let connectors = parse_config(LOAD_BALANCE_WITH_KEY_PROFILE).expect("Parsing failed");
+        let connectors = parse_config_with_defs(DEFS_KEY_PROFILE, LOAD_BALANCE_WITH_KEY_PROFILE)
+            .expect("Parsing failed");
 
         let upstream = &connectors.upstreams[0];
         let lb_options = upstream.lb_options.clone().unwrap();
@@ -902,14 +678,14 @@ mod tests {
     }
 
     const LOAD_BALANCE_HASH_WITHOUT_KEY_SOURCE: &str = r#"
-        connectors {
-            load-balance {
-                selection "Ketama"
-            }
-            proxy {
-                server "127.0.0.1:8080"
-            }
+    connectors {
+        load-balance {
+            selection "Ketama"
         }
+        proxy {
+            server "127.0.0.1:8080"
+        }
+    }
     "#;
 
     #[test]
@@ -922,17 +698,17 @@ mod tests {
     }
 
     const LOAD_BALANCE_DUPLICATE: &str = r#"
-        connectors {
-            load-balance {
-                selection "RoundRobin"
-            }
-            load-balance {
-                selection "Random"
-            }
-            proxy {
-                server "127.0.0.1:8081"
-            }
+    connectors {
+        load-balance {
+            selection "RoundRobin"
         }
+        load-balance {
+            selection "Random"
+        }
+        proxy {
+            server "127.0.0.1:8081"
+        }
+    }
     "#;
 
     #[test]
@@ -941,19 +717,19 @@ mod tests {
         assert!(result.is_err());
 
         let err_msg = result.unwrap_err().help().unwrap().to_string();
-        assert!(err_msg.contains("Duplicate 'load-balance' directive"));
+        assert_err_contains!(err_msg, "Directive 'load-balance' cannot be repeated");
     }
 
     const MULTI_SERVER_PROXY_CONFIG: &str = r#"
-        connectors {
-            proxy { 
-                tls-sni "onevariable.com" 
-                proto "h2-or-h1"
-                server "91.107.223.4:443" 
-                server "91.107.223.5:443" 
-                server "91.107.223.6:443"
-            }
+    connectors {
+        proxy { 
+            tls-sni "onevariable.com" 
+            proto "h2-or-h1"
+            server "91.107.223.4:443" 
+            server "91.107.223.5:443" 
+            server "91.107.223.6:443"
         }
+    }
     "#;
 
     #[test]
@@ -1004,11 +780,11 @@ mod tests {
     }
 
     const SINGLE_SERVER_BLOCK_PROXY_CONFIG: &str = r#"
-        connectors {
-            proxy {
-                server "127.0.0.1:8080"
-            }
+    connectors {
+        proxy {
+            server "127.0.0.1:8080"
         }
+    }
     "#;
 
     #[test]
@@ -1036,13 +812,13 @@ mod tests {
     }
 
     const ERROR_DUPLICATE_PROTO: &str = r#"
-        connectors {
-            proxy {
-                proto "h2-or-h1"
-                proto "h1-only"
-                server "127.0.0.1:8080"
-            }
+    connectors {
+        proxy {
+            proto "h2-or-h1"
+            proto "h1-only"
+            server "127.0.0.1:8080"
         }
+    }
     "#;
 
     #[test]
@@ -1050,15 +826,15 @@ mod tests {
         let result = parse_config(ERROR_DUPLICATE_PROTO);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().help().unwrap().to_string();
-        crate::assert_err_contains!(err_msg, "Duplicate 'proto' directive in proxy block");
+        crate::assert_err_contains!(err_msg, "Directive 'proto' cannot be repeated");
     }
 
     const ERROR_NO_SERVERS: &str = r#"
-        connectors {
-            proxy {
-                tls-sni "a.com"
-            }
+    connectors {
+        proxy {
+            tls-sni "a.com"
         }
+    }
     "#;
 
     #[test]
@@ -1068,16 +844,16 @@ mod tests {
         let err_msg = result.unwrap_err().help().unwrap().to_string();
         crate::assert_err_contains!(
             err_msg,
-            "Proxy block must contain at least one 'server' directive"
+            "Missing required directive 'server' (at least one expected)"
         );
     }
 
     const ERROR_BLOCK_WITH_ARG: &str = r#"
-        connectors {
-            proxy "http://invalid.com" {
-                server "127.0.0.1:8080"
-            }
+    connectors {
+        proxy "http://invalid.com" {
+            server "127.0.0.1:8080"
         }
+    }
     "#;
 
     #[test]
@@ -1085,7 +861,7 @@ mod tests {
         let result = parse_config(ERROR_BLOCK_WITH_ARG);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().help().unwrap().to_string();
-        crate::assert_err_contains!(err_msg, "The block-style 'proxy' cannot have arguments");
+        crate::assert_err_contains!(err_msg, "Directive 'proxy' cannot have arguments");
     }
 
     const INVALID_STRICT_NESTING: &str = r#"
@@ -1093,7 +869,7 @@ mod tests {
         section "/api" as="exact" {
             // This should fail because parent is exact
             section "/v1" {
-                return code="200" response="fail"
+                return code=200 response="fail"
             }
         }
     }
@@ -1102,9 +878,7 @@ mod tests {
     #[test]
     fn test_strict_section_cannot_have_children() {
         let result = parse_config(INVALID_STRICT_NESTING);
-
         let err_msg = result.err().unwrap().help().unwrap().to_string();
-
         crate::assert_err_contains!(
             err_msg,
             "A section with 'exact' routing mode cannot contain nested sections"
@@ -1115,7 +889,7 @@ mod tests {
     connectors {
         section "/api" as="exact" {
             // Non-section children are allowed
-            return code="200" response="OK"
+            return code=200 response="OK"
         }
     }
     "#;
@@ -1126,7 +900,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    const ARGS_PARSING_TEST: &str = r#"
+    const DEFS_ARGS: &str = r#"
     definitions {
         modifiers {
             chain-filters "defined_with_args" {
@@ -1135,7 +909,9 @@ mod tests {
             }
         }
     }
+    "#;
 
+    const ARGS_PARSING_CONN: &str = r#"
     connectors {
         use-chain {
             filter name="rate-limit" rps="100" burst="20"
@@ -1147,7 +923,8 @@ mod tests {
 
     #[test]
     fn test_filter_args_parsing() {
-        let connectors = parse_config(ARGS_PARSING_TEST).expect("Parsing failed");
+        let connectors =
+            parse_config_with_defs(DEFS_ARGS, ARGS_PARSING_CONN).expect("Parsing failed");
         let upstream = &connectors.upstreams[0];
 
         assert_eq!(upstream.chains.len(), 2);
@@ -1205,18 +982,15 @@ mod tests {
             Modificator::Chain(named_chain) => {
                 assert_eq!(named_chain.chain.filters.len(), 1);
                 let filter = &named_chain.chain.filters[0];
-
                 assert_eq!(filter.name, "logger");
-
                 let level_arg = filter.args.get("level").expect("Argument 'level' missing");
                 assert_eq!(level_arg, "debug");
-
                 assert_eq!(filter.args.len(), 1);
             }
         }
     }
 
-    const SIMPLE_CHAIN: &str = r#"
+    const DEFS_SIMPLE: &str = r#"
     definitions {
         modifiers {
             chain-filters "security" {
@@ -1225,7 +999,9 @@ mod tests {
             }
         }
     }
+    "#;
 
+    const SIMPLE_CHAIN_CONN: &str = r#"
     connectors {
         use-chain "security"
         proxy "http://127.0.0.1:8080"
@@ -1234,7 +1010,8 @@ mod tests {
 
     #[test]
     fn test_use_chain_simple() {
-        let connectors = parse_config(SIMPLE_CHAIN).expect("Parsing failed");
+        let connectors =
+            parse_config_with_defs(DEFS_SIMPLE, SIMPLE_CHAIN_CONN).expect("Parsing failed");
         let upstream = &connectors.upstreams[0];
 
         assert_eq!(upstream.chains.len(), 1, "Should have 1 rule (the chain)");
@@ -1248,7 +1025,7 @@ mod tests {
         }
     }
 
-    const NESTED_INHERITANCE: &str = r#"
+    const DEFS_NESTED: &str = r#"
     definitions {
         modifiers {
             chain-filters "global-log" {
@@ -1259,7 +1036,9 @@ mod tests {
             }
         }
     }
+    "#;
 
+    const NESTED_INHERITANCE_CONN: &str = r#"
     connectors {
         use-chain "global-log"
 
@@ -1276,46 +1055,44 @@ mod tests {
 
     #[test]
     fn test_use_chain_inheritance() {
-        let connectors = parse_config(NESTED_INHERITANCE).expect("Parsing failed");
+        let connectors =
+            parse_config_with_defs(DEFS_NESTED, NESTED_INHERITANCE_CONN).expect("Parsing failed");
 
         let api_upstream = connectors.upstreams.iter()
-            .find(|u|
-                match &u.upstream {
-                    UpstreamConfig::Service(s) => &s.prefix_path,
-                    _ => panic!("not for this test")
-                } == "/api")
+            .find(|u| match &u.upstream {
+                UpstreamConfig::Service(s) => &s.prefix_path,
+                _ => panic!("not for this test")
+            } == "/api")
             .expect("API upstream not found");
 
         assert_eq!(api_upstream.chains.len(), 2);
-
         let Modificator::Chain(r1) = &api_upstream.chains[0];
-
         assert_eq!(r1.chain.filters[0].name, "logger");
-
         let Modificator::Chain(r2) = &api_upstream.chains[1];
         assert_eq!(r2.chain.filters[0].name, "rate-limit");
 
         let public_upstream = connectors.upstreams.iter()
             .find(|u| match &u.upstream {
-                    UpstreamConfig::Service(s) => &s.prefix_path,
-                    _ => panic!("not for this test")
-                } == "/public")
+                UpstreamConfig::Service(s) => &s.prefix_path,
+                _ => panic!("not for this test")
+            } == "/public")
             .expect("Public upstream not found");
 
         assert_eq!(public_upstream.chains.len(), 1);
-
         let Modificator::Chain(r1) = &public_upstream.chains[0];
         assert_eq!(r1.chain.filters[0].name, "logger");
     }
 
-    const MULTIPLE_CHAINS_IN_SCOPE: &str = r#"
+    const DEFS_MULTI: &str = r#"
     definitions {
         modifiers {
             chain-filters "a" { filter name="A" }
             chain-filters "b" { filter name="B" }
         }
     }
+    "#;
 
+    const MULTIPLE_CHAINS_CONN: &str = r#"
     connectors {
         section "/combo" {
             use-chain "a"
@@ -1327,7 +1104,8 @@ mod tests {
 
     #[test]
     fn test_multiple_chains_same_level() {
-        let connectors = parse_config(MULTIPLE_CHAINS_IN_SCOPE).expect("Parsing failed");
+        let connectors =
+            parse_config_with_defs(DEFS_MULTI, MULTIPLE_CHAINS_CONN).expect("Parsing failed");
         let upstream = &connectors.upstreams[0];
 
         assert_eq!(upstream.chains.len(), 2);
@@ -1338,13 +1116,15 @@ mod tests {
         assert_eq!(r.chain.filters[0].name, "B");
     }
 
-    const MISSING_CHAIN: &str = r#"
+    const DEFS_MISSING: &str = r#"
     definitions {
         modifiers {
             chain-filters "exists" { filter name="ok" }
         }
     }
+    "#;
 
+    const MISSING_CHAIN_CONN: &str = r#"
     connectors {
         use-chain "GHOST"
         proxy "http://127.0.0.1:8080"
@@ -1353,34 +1133,37 @@ mod tests {
 
     #[test]
     fn test_missing_chain_error() {
-        let result = parse_config(MISSING_CHAIN);
+        let result = parse_config_with_defs(DEFS_MISSING, MISSING_CHAIN_CONN);
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().help().unwrap().to_string();
-
         assert!(err_msg.contains("Chain 'GHOST' not found in definitions"));
     }
 
     const CONNECTORS_NESTED_SECTIONS: &str = r#"
-        connectors {
+    connectors {
+        proxy "http://0.0.0.0:8000"
+        section "/first" as="prefix" {
             proxy "http://0.0.0.0:8000"
-            section "/first" as="prefix" {
-                proxy "http://0.0.0.0:8000"
-                section "/second" {
-                    proxy "http://0.0.0.0:8001/something"
-                }
+            section "/second" {
+                proxy "http://0.0.0.0:8001/something"
             }
         }
+    }
     "#;
 
     #[test]
     fn connectors_with_nested_sections() {
         let doc: KdlDocument = CONNECTORS_NESTED_SECTIONS.parse().unwrap();
         let table = DefinitionsTable::default();
-        let section = ConnectorsSection::new(&doc, &table, "test");
         let mut anon = DefinitionsTable::default();
+        let ctx = ParseContext::new(&doc, Current::Document(&doc), "test");
+        let mut block = BlockParser::new(ctx).unwrap();
 
-        let nodes = section.parse_connections_node(&doc, &mut anon).unwrap();
+        let nodes = block.required("connectors", |ctx| {
+             ConnectorsSection::new(&table).parse_connections_node(ctx, &mut anon)
+        }).unwrap();
+
         let ConnectorsLeaf::Upstream(UpstreamConfig::Service(first)) = &nodes[0] else {
             unreachable!()
         };
@@ -1412,110 +1195,82 @@ mod tests {
     }
 
     const CONNECTORS_SECTION_WITH_PATH: &str = r#"
-        connectors {
-            section "/old-path" {
-                proxy "http://0.0.0.0:8000/new-path"
-            }
+    connectors {
+        section "/old-path" {
+            proxy "http://0.0.0.0:8000/new-path"
         }
+    }
     "#;
 
     #[test]
     fn service_section_with_path() {
-        let doc: KdlDocument = CONNECTORS_SECTION_WITH_PATH.parse().unwrap();
-        let table = DefinitionsTable::default();
-        let section = ConnectorsSection::new(&doc, &table, "test");
-
-        let mut anon = DefinitionsTable::default();
-        let ConnectorsLeaf::Section(simple) =
-            &section.parse_connections_node(&doc, &mut anon).unwrap()[0]
-        else {
-            unreachable!()
-        };
-
-        let ConnectorsLeaf::Upstream(UpstreamConfig::Service(s)) = &simple[0] else {
-            unreachable!()
-        };
-
-        assert_eq!(s.prefix_path, "/old-path");
-        assert_eq!(s.target_path, "/new-path");
+        let connectors = parse_config(CONNECTORS_SECTION_WITH_PATH).unwrap();
+        let upstream = &connectors.upstreams[0];
+        if let UpstreamConfig::Service(s) = &upstream.upstream {
+            assert_eq!(s.prefix_path, "/old-path");
+            assert_eq!(s.target_path, "/new-path");
+        } else {
+            panic!("Expected Service upstream");
+        }
     }
 
     const CONNECTORS_SECTION: &str = r#"
-        connectors {
-            section "/" {
-                proxy "http://0.0.0.0:8000"
-            }
+    connectors {
+        section "/" {
+            proxy "http://0.0.0.0:8000"
         }
+    }
     "#;
 
     #[test]
     fn service_section() {
-        let doc: KdlDocument = CONNECTORS_SECTION.parse().unwrap();
-        let table = DefinitionsTable::default();
-        let section = ConnectorsSection::new(&doc, &table, "test");
-
-        let mut anon = DefinitionsTable::default();
-        let ConnectorsLeaf::Section(simple) =
-            &section.parse_connections_node(&doc, &mut anon).unwrap()[0]
-        else {
-            unreachable!()
-        };
-
-        let ConnectorsLeaf::Upstream(UpstreamConfig::Service(s)) = &simple[0] else {
-            unreachable!()
-        };
-
-        assert_eq!(
-            s.peer_address,
-            SocketAddr::V4("0.0.0.0:8000".parse().unwrap())
-        );
+        let connectors = parse_config(CONNECTORS_SECTION).unwrap();
+        let upstream = &connectors.upstreams[0];
+        if let UpstreamConfig::Service(s) = &upstream.upstream {
+            assert_eq!(
+                s.peer_address,
+                SocketAddr::V4("0.0.0.0:8000".parse().unwrap())
+            );
+        } else {
+            panic!("Expected Service upstream");
+        }
     }
 
     const CONNECTORS_PROXY: &str = r#"
-        connectors {
-            proxy "http://0.0.0.0:8000"
-        }
+    connectors {
+        proxy "http://0.0.0.0:8000"
+    }
     "#;
 
     #[test]
     fn service_proxy() {
-        let doc: KdlDocument = CONNECTORS_PROXY.parse().unwrap();
-        let table = DefinitionsTable::default();
-        let section = ConnectorsSection::new(&doc, &table, "test");
-
-        let mut anon = DefinitionsTable::default();
-        let simple = &section.parse_connections_node(&doc, &mut anon).unwrap()[0];
-
-        if let ConnectorsLeaf::Upstream(UpstreamConfig::Service(s)) = simple {
+        let connectors = parse_config(CONNECTORS_PROXY).unwrap();
+        let upstream = &connectors.upstreams[0];
+        if let UpstreamConfig::Service(s) = &upstream.upstream {
             assert_eq!(
                 s.peer_address,
                 SocketAddr::V4("0.0.0.0:8000".parse().unwrap())
-            )
+            );
         } else {
-            panic!("Expected Service variant, got");
+            panic!("Expected Service upstream");
         }
     }
 
     const CONNECTORS_RETURN_SIMPLE_RESPONSE: &str = r#"
-        connectors {
-            return code="200" response="OK"
-        }
+    connectors {
+        return code=200 response="OK"
+    }
     "#;
 
     #[test]
     fn service_return_simple_response() {
-        let doc: KdlDocument = CONNECTORS_RETURN_SIMPLE_RESPONSE.parse().unwrap();
-        let table = DefinitionsTable::default();
-        let section = ConnectorsSection::new(&doc, &table, "test");
-
-        let mut anon = DefinitionsTable::default();
-        let simple = &section.parse_connections_node(&doc, &mut anon).unwrap()[0];
-
-        if let ConnectorsLeaf::Upstream(UpstreamConfig::Static(response)) = simple {
+        let connectors = parse_config(CONNECTORS_RETURN_SIMPLE_RESPONSE).unwrap();
+        let upstream = &connectors.upstreams[0];
+        if let UpstreamConfig::Static(response) = &upstream.upstream {
             assert_eq!(response.http_code, http::StatusCode::OK);
             assert_eq!(response.response_body, "OK");
         } else {
-            panic!("Expected Static variant, got");
+            panic!("Expected Static upstream");
         }
     }
 }
